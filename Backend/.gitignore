@@ -5,3 +5,8 @@ logs/
 .env
 downloads/
 token.json
+
+#some readme file
+GOOGLE_DRIVE_SETUP.md
+GOOGLE_DRIVE_QUICK_START.md
+GOOGLE_DRIVE_VERIFICATION.md

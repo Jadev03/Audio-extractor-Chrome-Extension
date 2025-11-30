@@ -241,10 +241,67 @@ app.post("/extract", async (req: Request, res: Response) => {
         });
 
         // Delete local file after successful upload to save disk space
+        const deleteLocalFile = async (filePath: string, maxRetries = 3) => {
+          for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+              // Wait a bit longer on Windows to ensure file handles are released
+              await new Promise(resolve => setTimeout(resolve, attempt * 200));
+              
+              if (!fs.existsSync(filePath)) {
+                logger.info("Local file already deleted", {
+                  requestId,
+                  fileName,
+                  filePath,
+                  attempt
+                });
+                return true;
+              }
+              
+              const fileStats = fs.statSync(filePath);
+              
+              // Try to delete the file
+              fs.unlinkSync(filePath);
+              
+              // Verify deletion
+              await new Promise(resolve => setTimeout(resolve, 100));
+              if (!fs.existsSync(filePath)) {
+                logger.info("Local file deleted after successful Google Drive upload", {
+                  requestId,
+                  fileName,
+                  filePath,
+                  fileSize: `${(fileStats.size / 1024 / 1024).toFixed(2)} MB`,
+                  attempt
+                });
+                return true;
+              } else {
+                logger.warn("File still exists after deletion attempt", {
+                  requestId,
+                  fileName,
+                  filePath,
+                  attempt,
+                  maxRetries
+                });
+              }
+            } catch (deleteError) {
+              if (attempt === maxRetries) {
+                throw deleteError;
+              }
+              logger.warn("Deletion attempt failed, retrying", {
+                requestId,
+                fileName,
+                filePath,
+                attempt,
+                error: deleteError instanceof Error ? deleteError.message : String(deleteError)
+              });
+            }
+          }
+          return false;
+        };
+        
         try {
-          if (fs.existsSync(outputPath)) {
-            fs.unlinkSync(outputPath);
-            logger.info("Local file deleted after successful Google Drive upload", {
+          const deleted = await deleteLocalFile(outputPath);
+          if (!deleted) {
+            logger.error("Failed to delete local file after multiple attempts (file is in Drive)", {
               requestId,
               fileName,
               filePath: outputPath
@@ -252,11 +309,12 @@ app.post("/extract", async (req: Request, res: Response) => {
           }
         } catch (deleteError) {
           // Log error but don't fail the request - file is already uploaded to Drive
-          logger.warn("Failed to delete local file after upload (file is in Drive)", {
+          logger.error("Failed to delete local file after upload (file is in Drive)", {
             requestId,
             fileName,
             filePath: outputPath,
-            error: deleteError instanceof Error ? deleteError.message : String(deleteError)
+            error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+            stack: deleteError instanceof Error ? deleteError.stack : undefined
           });
         }
       } catch (driveError) {

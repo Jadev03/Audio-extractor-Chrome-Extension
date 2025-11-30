@@ -279,9 +279,21 @@ export async function uploadToDrive(
       fileMetadata.parents = [DRIVE_FOLDER_ID];
     }
 
+    // Create read stream and ensure it's properly closed after upload
+    const fileStream = fs.createReadStream(filePath);
+    
+    // Handle stream errors
+    fileStream.on('error', (error) => {
+      logger.error("File stream error during upload", {
+        fileName,
+        filePath,
+        error: error.message
+      });
+    });
+    
     const media = {
       mimeType: "audio/mpeg",
-      body: fs.createReadStream(filePath),
+      body: fileStream,
     };
 
     logger.info("Uploading file to Google Drive", {
@@ -295,6 +307,11 @@ export async function uploadToDrive(
       media: media,
       fields: "id, name, webViewLink, webContentLink",
     });
+    
+    // Ensure stream is closed after upload completes
+    if (!fileStream.destroyed) {
+      fileStream.destroy();
+    }
 
     if (!response.data.id) {
       throw new Error("Failed to upload file - no file ID returned");
