@@ -1,20 +1,66 @@
-import express, { Request, Response } from "express";
-import cors from "cors";
-import path from "path";
-import fs from "fs";
+// Load environment variables from .env file FIRST, before any other imports
+import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
+import path from "path";
+import fs from "fs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Configure dotenv to load .env file
+// Try multiple possible locations
+const possibleEnvPaths = [
+  path.join(__dirname, ".env"),           // Same directory (development)
+  path.join(__dirname, "..", ".env"),     // Parent directory (production from dist)
+  path.join(process.cwd(), ".env"),       // Current working directory
+  path.join(process.cwd(), "Backend", ".env") // Backend subdirectory
+];
+
+let envLoaded = false;
+let loadedEnvPath = null;
+
+for (const envPath of possibleEnvPaths) {
+  if (fs.existsSync(envPath)) {
+    const result = dotenv.config({ path: envPath });
+    if (!result.error) {
+      envLoaded = true;
+      loadedEnvPath = envPath;
+      break;
+    }
+  }
+}
+
+// Also try default dotenv.config() as fallback
+if (!envLoaded) {
+  dotenv.config();
+}
+
+// Log environment loading status (before logger is imported)
+if (process.env.NODE_ENV !== "production") {
+  console.log("[ENV] Environment variables loaded:", {
+    envFileFound: envLoaded,
+    envFilePath: loadedEnvPath,
+    hasClientId: !!process.env.GOOGLE_CLIENT_ID,
+    hasClientSecret: !!process.env.GOOGLE_CLIENT_SECRET,
+    hasFolderId: !!process.env.GOOGLE_DRIVE_FOLDER_ID,
+    __dirname: __dirname,
+    cwd: process.cwd()
+  });
+}
+
+// Now import other modules (they may use process.env)
+import express, { Request, Response } from "express";
+import cors from "cors";
 import { createRequire } from "module";
 import { execSync, spawnSync } from "child_process";
 import logger, { auditLog } from "./logger.js";
+import { uploadToDrive, getAuthUrl, getTokenFromCode, isDriveConfigured } from "./driveService.js";
 
 // Import yt-dlp-wrap as CommonJS module using createRequire
 const require = createRequire(import.meta.url);
 const ytDlpWrapModule = require("yt-dlp-wrap");
 const YTDlpWrap = ytDlpWrapModule.default || ytDlpWrapModule;
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 const app = express();
 app.use(cors());
@@ -181,18 +227,64 @@ app.post("/extract", async (req: Request, res: Response) => {
       duration: `${duration}ms`
     });
 
+    // Upload to Google Drive if configured
+    let driveFileInfo = null;
+    if (isDriveConfigured()) {
+      try {
+        logger.info("Uploading to Google Drive", { requestId, fileName });
+        driveFileInfo = await uploadToDrive(outputPath, fileName);
+        
+        logger.info("File uploaded to Google Drive successfully", {
+          requestId,
+          fileId: driveFileInfo.fileId,
+          webViewLink: driveFileInfo.webViewLink
+        });
+
+        // Delete local file after successful upload to save disk space
+        try {
+          if (fs.existsSync(outputPath)) {
+            fs.unlinkSync(outputPath);
+            logger.info("Local file deleted after successful Google Drive upload", {
+              requestId,
+              fileName,
+              filePath: outputPath
+            });
+          }
+        } catch (deleteError) {
+          // Log error but don't fail the request - file is already uploaded to Drive
+          logger.warn("Failed to delete local file after upload (file is in Drive)", {
+            requestId,
+            fileName,
+            filePath: outputPath,
+            error: deleteError instanceof Error ? deleteError.message : String(deleteError)
+          });
+        }
+      } catch (driveError) {
+        logger.error("Failed to upload to Google Drive, keeping local file", {
+          requestId,
+          error: driveError instanceof Error ? driveError.message : String(driveError)
+        });
+        // Continue with local file URL if Drive upload fails
+      }
+    }
+
     auditLog("EXTRACTION_SUCCESS", {
       requestId,
       youtubeUrl,
       fileName,
       fileSize,
       duration,
+      driveFileId: driveFileInfo?.fileId || null,
       ip: req.ip || req.socket.remoteAddress
     });
 
+    // Return Google Drive link if available, otherwise local file URL
     res.json({
       success: true,
-      fileUrl: `http://localhost:5000/downloads/${fileName}`
+      fileUrl: driveFileInfo?.webViewLink || `http://localhost:5000/downloads/${fileName}`,
+      driveFileId: driveFileInfo?.fileId || null,
+      driveWebViewLink: driveFileInfo?.webViewLink || null,
+      localFileUrl: driveFileInfo ? null : `http://localhost:5000/downloads/${fileName}`
     });
 
   } catch (err) {
@@ -234,20 +326,161 @@ app.post("/extract", async (req: Request, res: Response) => {
   }
 });
 
+// Google Drive OAuth endpoints
+app.get("/auth/google", (req: Request, res: Response) => {
+  try {
+    const authUrl = getAuthUrl();
+    res.json({ authUrl });
+  } catch (error) {
+    logger.error("Error generating auth URL", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to generate auth URL"
+    });
+  }
+});
+
+app.get("/oauth2callback", async (req: Request, res: Response) => {
+  const code = req.query.code as string;
+  
+  if (!code) {
+    return res.status(400).send(`
+      <html>
+        <body>
+          <h1>Authorization Failed</h1>
+          <p>No authorization code received.</p>
+          <p><a href="/auth/google">Try again</a></p>
+        </body>
+      </html>
+    `);
+  }
+
+  try {
+    logger.info("Exchanging authorization code for token", { code: code.substring(0, 10) + "..." });
+    const tokenData = await getTokenFromCode(code);
+    
+    // Verify token was saved
+    const tokenPath = path.join(__dirname, "token.json");
+    const tokenSaved = fs.existsSync(tokenPath);
+    
+    logger.info("OAuth token saved successfully", {
+      hasRefreshToken: !!tokenData.refresh_token,
+      hasAccessToken: !!tokenData.access_token,
+      tokenFileExists: tokenSaved
+    });
+    
+    res.send(`
+      <html>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+          <h1 style="color: #34a853;">✅ Authorization Successful!</h1>
+          <p>Google Drive access has been configured.</p>
+          <p>You can close this window and return to the extension.</p>
+          <p style="margin-top: 30px; color: #666;">Token saved. Audio files will now be uploaded to Google Drive.</p>
+          <p style="margin-top: 20px; font-size: 12px; color: #999;">
+            Token file: ${tokenSaved ? "✅ Found" : "❌ Not found"} at ${tokenPath}
+          </p>
+        </body>
+      </html>
+    `);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    
+    logger.error("Error exchanging code for token", {
+      error: errorMessage,
+      stack: errorStack
+    });
+    
+    res.status(500).send(`
+      <html>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+          <h1 style="color: #ea4335;">❌ Authorization Failed</h1>
+          <p><strong>Error:</strong> ${errorMessage}</p>
+          <p style="margin-top: 20px;">Common issues:</p>
+          <ul style="text-align: left; display: inline-block; margin-top: 10px;">
+            <li>Authorization code expired (codes expire quickly)</li>
+            <li>Redirect URI mismatch in Google Cloud Console</li>
+            <li>Invalid client credentials</li>
+          </ul>
+          <p style="margin-top: 30px;"><a href="/auth/google">Try again</a></p>
+          <p style="margin-top: 10px;"><a href="/drive/status">Check status</a></p>
+        </body>
+      </html>
+    `);
+  }
+});
+
+// Check Google Drive status
+app.get("/drive/status", (req: Request, res: Response) => {
+  const configured = isDriveConfigured();
+  const hasClientId = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_ID !== "");
+  const hasClientSecret = !!(process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_CLIENT_SECRET !== "");
+  const hasFolderId = !!(process.env.GOOGLE_DRIVE_FOLDER_ID && process.env.GOOGLE_DRIVE_FOLDER_ID !== "");
+  const tokenPath = path.join(__dirname, "token.json");
+  const hasToken = fs.existsSync(tokenPath) || !!process.env.GOOGLE_REFRESH_TOKEN;
+  
+  // Determine the appropriate message
+  let message = "";
+  let nextStep = "";
+  
+  if (!hasClientId || !hasClientSecret) {
+    message = "Google Drive credentials not configured";
+    nextStep = "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env file";
+  } else if (!hasFolderId) {
+    message = "Google Drive folder not configured";
+    nextStep = "Set GOOGLE_DRIVE_FOLDER_ID in .env file";
+  } else if (!hasToken) {
+    message = "Google Drive credentials configured, but OAuth not completed";
+    nextStep = "Visit /auth/google to get authorization URL, then complete OAuth flow";
+  } else {
+    message = "Google Drive is fully configured and ready";
+    nextStep = "Audio files will be uploaded to Google Drive automatically";
+  }
+  
+  res.json({
+    configured,
+    message,
+    nextStep,
+    details: {
+      hasClientId,
+      hasClientSecret,
+      hasFolderId,
+      hasToken,
+      tokenFileExists: fs.existsSync(tokenPath),
+      tokenFilePath: tokenPath,
+      envFileLoaded: hasClientId || hasClientSecret
+    }
+  });
+});
+
 // Serve static files from downloads directory
 app.use("/downloads", express.static(downloadsDir));
 
 const PORT = 5000;
 app.listen(PORT, () => {
+  const driveConfigured = isDriveConfigured();
+  
   logger.info(`Backend server started`, {
     port: PORT,
     environment: process.env.NODE_ENV || "development",
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    googleDriveConfigured: driveConfigured
   });
+
+  if (!driveConfigured) {
+    logger.warn("Google Drive is not configured. Audio files will be saved locally only.", {
+      hint: "Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_DRIVE_FOLDER_ID in .env file, then visit /auth/google"
+    });
+  } else {
+    logger.info("Google Drive is configured and ready for uploads");
+  }
 
   auditLog("SERVER_STARTED", {
     port: PORT,
-    environment: process.env.NODE_ENV || "development"
+    environment: process.env.NODE_ENV || "development",
+    googleDriveConfigured: driveConfigured
   });
 });
 

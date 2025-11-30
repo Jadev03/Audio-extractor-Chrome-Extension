@@ -6,6 +6,7 @@ function Popup() {
   const [downloadUrl, setDownloadUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState(false);
 
   const getYouTubeUrl = () => {
     chrome.runtime.sendMessage({ type: "GET_YT_URL" }, (response: { url?: string }) => {
@@ -27,6 +28,7 @@ function Popup() {
     setLoading(true);
     setError("");
     setDownloadUrl("");
+    setSuccess(false);
 
     try {
       const res = await fetch("http://localhost:5000/extract", {
@@ -45,6 +47,19 @@ function Popup() {
       if (data.success && data.fileUrl) {
         setDownloadUrl(data.fileUrl);
         setError("");
+        setSuccess(true);
+        
+        // Show success notification
+        try {
+          chrome.notifications.create({
+            type: "basic",
+            iconUrl: chrome.runtime.getURL("/vite.svg"),
+            title: "✅ Audio Extraction Complete!",
+            message: "Your audio file is ready to download. Click the download button in the extension popup."
+          });
+        } catch (e) {
+          console.log("Notification failed:", e);
+        }
       } else {
         throw new Error(data.error || "Extraction failed");
       }
@@ -79,16 +94,25 @@ function Popup() {
         {loading ? "Extracting..." : "Extract Audio"}
       </button>
 
+      {success && !loading && (
+        <div className="success-message">
+          ✅ Audio extracted successfully! Ready to download.
+        </div>
+      )}
+
       {error && (
         <div className="error-message">
-          {error}
+          ❌ {error}
         </div>
       )}
 
       {downloadUrl && !loading && (
-        <a href={downloadUrl} target="_blank" download>
-          <button className="download-button">Download Audio</button>
-        </a>
+        <div className="download-section">
+          <a href={downloadUrl} target="_blank" download>
+            <button className="download-button">📥 Download Audio</button>
+          </a>
+          <p className="download-hint">Click to download the MP3 file</p>
+        </div>
       )}
     </div>
   );

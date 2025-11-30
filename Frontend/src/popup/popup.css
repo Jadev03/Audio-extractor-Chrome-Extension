@@ -74,3 +74,31 @@
   border: 1px solid #f28b82;
 }
 
+.success-message {
+  color: #34a853;
+  margin-top: 10px;
+  font-size: 13px;
+  padding: 10px;
+  background-color: #e6f4ea;
+  border-radius: 4px;
+  border: 1px solid #81c995;
+  font-weight: 500;
+  text-align: center;
+}
+
+.download-section {
+  margin-top: 15px;
+  padding: 12px;
+  background-color: #f8f9fa;
+  border-radius: 4px;
+  border: 1px solid #dadce0;
+  text-align: center;
+}
+
+.download-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #5f6368;
+  margin-bottom: 0;
+}
+

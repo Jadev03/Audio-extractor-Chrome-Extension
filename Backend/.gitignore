@@ -4,3 +4,4 @@ dist
 logs/
 .env
 downloads/
+token.json

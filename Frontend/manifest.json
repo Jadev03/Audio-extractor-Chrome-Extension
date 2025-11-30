@@ -3,7 +3,7 @@
     "name": "YouTube Audio Extractor",
     "version": "1.0",
     "description": "Extract and download audio from YouTube videos.",
-    "permissions": ["tabs", "activeTab", "scripting"],
+    "permissions": ["tabs", "activeTab", "scripting", "notifications"],
     "host_permissions": [
       "https://www.youtube.com/*",
       "http://localhost:5000/*"
