@@ -101,8 +101,9 @@ const auditLogger = winston.createLogger({
   transports: [auditLogsTransport]
 });
 
-// Add console transport in development
-if (process.env.NODE_ENV !== "production") {
+// Add console transport in development or when LOG_CONSOLE is enabled
+// This helps with Docker visibility
+if (process.env.NODE_ENV !== "production" || process.env.LOG_CONSOLE === "true") {
   logger.add(
     new winston.transports.Console({
       format: consoleFormat

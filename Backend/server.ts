@@ -94,31 +94,90 @@ app.use((req: Request, res: Response, next) => {
 });
 
 // Initialize yt-dlp-wrap
+// In Docker, always prefer python -m yt_dlp as it's more reliable
 // Check if yt-dlp is available, use python -m yt_dlp if needed
 let usePythonModule = false;
-try {
-  execSync("yt-dlp --version", { stdio: "ignore" });
-  logger.info("yt-dlp found in PATH");
-} catch {
-  // Try python -m yt_dlp
+
+// In Docker/container environments, prefer python module
+const isDocker = fs.existsSync("/.dockerenv") || process.env.DOCKER_CONTAINER === "true";
+
+if (isDocker) {
+  // In Docker, always use python module
   try {
-    execSync("python -m yt_dlp --version", { stdio: "ignore" });
+    execSync("python3 -m yt_dlp --version", { stdio: "ignore" });
     usePythonModule = true;
-    logger.info("Using python -m yt_dlp for yt-dlp execution");
-  } catch (err) {
-    logger.error("yt-dlp not found. Please install: pip install yt-dlp");
+    logger.info("Docker detected: Using python3 -m yt_dlp for yt-dlp execution");
+  } catch {
+    try {
+      execSync("python -m yt_dlp --version", { stdio: "ignore" });
+      usePythonModule = true;
+      logger.info("Docker detected: Using python -m yt_dlp for yt-dlp execution");
+    } catch (err) {
+      logger.error("yt-dlp not found in Docker. Please install: pip install yt-dlp");
+    }
+  }
+} else {
+  // On local machine, try python module first, then binary
+  try {
+    execSync("python3 -m yt_dlp --version", { stdio: "ignore" });
+    usePythonModule = true;
+    logger.info("Using python3 -m yt_dlp for yt-dlp execution");
+  } catch {
+    try {
+      execSync("python -m yt_dlp --version", { stdio: "ignore" });
+      usePythonModule = true;
+      logger.info("Using python -m yt_dlp for yt-dlp execution");
+    } catch {
+      // Try yt-dlp binary directly
+      try {
+        execSync("yt-dlp --version", { stdio: "ignore" });
+        logger.info("yt-dlp found in PATH (will use yt-dlp-wrap)");
+      } catch (err) {
+        logger.error("yt-dlp not found. Please install: pip install yt-dlp");
+      }
+    }
   }
 }
 
 // FFmpeg path configuration
-const ffmpegDir = "C:\\Users\\THABENDRA\\Desktop\\ffmpeg-2025-06-02-git-688f3944ce-full_build\\ffmpeg-build\\bin";
-const ffmpegPath = path.join(ffmpegDir, "ffmpeg.exe");
+// Try multiple methods to find FFmpeg:
+// 1. Check if ffmpeg is in PATH (Docker/Linux)
+// 2. Try ffmpeg-static package
+// 3. Fall back to Windows hardcoded path
+let ffmpegDir: string | null = null;
+let ffmpegPath: string | null = null;
 
-// Verify ffmpeg exists
-if (fs.existsSync(ffmpegPath)) {
-  logger.info("FFmpeg found at configured path", { ffmpegPath });
-} else {
-  logger.warn("FFmpeg not found at configured path. Audio conversion may fail.", { ffmpegPath });
+// Check if ffmpeg is in PATH (works in Docker/Linux)
+try {
+  execSync("ffmpeg -version", { stdio: "ignore" });
+  ffmpegDir = ""; // Empty means use system PATH
+  logger.info("FFmpeg found in system PATH");
+} catch {
+  // Try ffmpeg-static package
+  try {
+    const ffmpegStaticModule = require("ffmpeg-static");
+    const ffmpegStaticPath = ffmpegStaticModule || ffmpegStaticModule.default || ffmpegStaticModule.path;
+    
+    if (ffmpegStaticPath && typeof ffmpegStaticPath === "string" && fs.existsSync(ffmpegStaticPath)) {
+      ffmpegPath = ffmpegStaticPath;
+      ffmpegDir = path.dirname(ffmpegPath);
+      logger.info("FFmpeg found via ffmpeg-static package", { ffmpegPath });
+    }
+  } catch (err) {
+    // Fall back to Windows hardcoded path
+    const windowsFfmpegDir = "C:\\Users\\THABENDRA\\Desktop\\ffmpeg-2025-06-02-git-688f3944ce-full_build\\ffmpeg-build\\bin";
+    const windowsFfmpegPath = path.join(windowsFfmpegDir, "ffmpeg.exe");
+    
+    if (fs.existsSync(windowsFfmpegPath)) {
+      ffmpegDir = windowsFfmpegDir;
+      ffmpegPath = windowsFfmpegPath;
+      logger.info("FFmpeg found at Windows configured path", { ffmpegPath });
+    } else {
+      logger.warn("FFmpeg not found. Audio conversion may fail. Please install FFmpeg.", {
+        triedPaths: ["system PATH", "ffmpeg-static", windowsFfmpegPath]
+      });
+    }
+  }
 }
 
 const ytDlpWrap = new YTDlpWrap();
@@ -167,15 +226,82 @@ app.post("/extract", async (req: Request, res: Response) => {
       outputPath
     });
 
-    // Use python -m yt_dlp if yt-dlp is not in PATH
+    // Use python -m yt_dlp if yt-dlp is not in PATH (preferred in Docker)
     if (usePythonModule) {
       // Execute using python -m yt_dlp with ffmpeg location and proper format selection
       // Use spawnSync to avoid shell parsing issues on Windows
-      const args = [
+      const pythonCmd = process.platform === "win32" ? "python" : "python3";
+      const args: string[] = [
         "-m", "yt_dlp",
         youtubeUrl,
         "--no-playlist", // Only download single video, not entire playlist
-        "--ffmpeg-location", ffmpegDir, // Set ffmpeg location
+        "--extract-audio", // Extract audio only
+        "--audio-format", "mp3", // Convert to MP3
+        "--audio-quality", "0", // Best quality
+        "--format", "bestaudio/best", // Prefer best audio format
+        "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
+        "--output", outputPath,
+        "--verbose" // Add verbose logging to see what's happening
+      ];
+      
+      // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
+      if (ffmpegDir && ffmpegDir !== "") {
+        args.splice(2, 0, "--ffmpeg-location", ffmpegDir);
+      }
+      
+      logger.info("Executing yt-dlp with python module", {
+        requestId,
+        command: `${pythonCmd} ${args.join(" ")}`,
+        outputPath
+      });
+      
+      const result = spawnSync(pythonCmd, args, {
+        stdio: "pipe", // Capture output for error messages
+        shell: false,
+        encoding: "utf8",
+        timeout: 300000 // 5 minute timeout
+      });
+      
+      // Log output for debugging
+      if (result.stdout) {
+        logger.info("yt-dlp stdout", {
+          requestId,
+          output: result.stdout.substring(0, 1000) // First 1000 chars
+        });
+      }
+      if (result.stderr) {
+        logger.warn("yt-dlp stderr", {
+          requestId,
+          error: result.stderr.substring(0, 1000) // First 1000 chars
+        });
+      }
+      
+      if (result.error) {
+        logger.error("yt-dlp spawn error", {
+          requestId,
+          error: result.error.message,
+          stack: result.error.stack
+        });
+        throw result.error;
+      }
+      
+      if (result.status !== 0) {
+        const errorOutput = result.stderr?.toString() || result.stdout?.toString() || "Unknown error";
+        logger.error("yt-dlp execution failed", {
+          requestId,
+          exitCode: result.status,
+          error: errorOutput.substring(0, 1000), // More error details
+          stdout: result.stdout?.toString().substring(0, 500),
+          stderr: result.stderr?.toString().substring(0, 500)
+        });
+        throw new Error(`yt-dlp process exited with code ${result.status}: ${errorOutput.substring(0, 300)}`);
+      }
+      
+      logger.info("yt-dlp execution completed successfully", { requestId });
+    } else {
+      const ytDlpArgs = [
+        youtubeUrl,
+        "--no-playlist", // Only download single video, not entire playlist
         "--extract-audio", // Extract audio only
         "--audio-format", "mp3", // Convert to MP3
         "--audio-quality", "0", // Best quality
@@ -184,35 +310,83 @@ app.post("/extract", async (req: Request, res: Response) => {
         "--output", outputPath
       ];
       
-      const result = spawnSync("python", args, {
-        stdio: "inherit",
-        shell: false
+      // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
+      if (ffmpegDir && ffmpegDir !== "") {
+        ytDlpArgs.splice(1, 0, "--ffmpeg-location", ffmpegDir);
+      }
+      
+      // Set yt-dlp binary path if available (for yt-dlp-wrap)
+      try {
+        // Try 'which' (Linux/Mac) or 'where' (Windows)
+        const whichCmd = process.platform === "win32" ? "where" : "which";
+        const ytDlpPath = execSync(`${whichCmd} yt-dlp`, { encoding: "utf8", stdio: "pipe" }).trim().split("\n")[0];
+        if (ytDlpPath && ytDlpPath.length > 0 && !ytDlpPath.includes("not found")) {
+          ytDlpWrap.setBinaryPath(ytDlpPath);
+          logger.info("yt-dlp binary path set for yt-dlp-wrap", { requestId, path: ytDlpPath });
+        }
+      } catch {
+        // Binary path not found, yt-dlp-wrap will try to find it automatically
+        logger.debug("Could not find yt-dlp binary path, yt-dlp-wrap will attempt auto-detection", { requestId });
+      }
+      
+      logger.info("Executing yt-dlp with yt-dlp-wrap", {
+        requestId,
+        args: ytDlpArgs,
+        outputPath
       });
       
-      if (result.error) {
-        throw result.error;
+      try {
+        // yt-dlp-wrap.exec returns a promise, but we need to handle errors properly
+        const result = await ytDlpWrap.exec(ytDlpArgs);
+        logger.info("yt-dlp-wrap execution completed", { requestId, result: result ? "success" : "unknown" });
+      } catch (ytDlpError) {
+        const errorMsg = ytDlpError instanceof Error ? ytDlpError.message : String(ytDlpError);
+        const errorStack = ytDlpError instanceof Error ? ytDlpError.stack : undefined;
+        logger.error("yt-dlp-wrap execution failed", {
+          requestId,
+          error: errorMsg,
+          stack: errorStack,
+          args: ytDlpArgs
+        });
+        throw new Error(`yt-dlp failed: ${errorMsg}`);
       }
-      
-      if (result.status !== 0) {
-        throw new Error(`yt-dlp process exited with code ${result.status}`);
-      }
-    } else {
-      await ytDlpWrap.exec([
-        youtubeUrl,
-        "--no-playlist", // Only download single video, not entire playlist
-        "--ffmpeg-location", ffmpegDir, // Set ffmpeg location
-        "--extract-audio", // Extract audio only
-        "--audio-format", "mp3", // Convert to MP3
-        "--audio-quality", "0", // Best quality
-        "--format", "bestaudio/best", // Prefer best audio format
-        "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
-        "--output", outputPath
-      ]);
     }
 
     // Check if file was created
+    // yt-dlp might create file with different name, so check downloads directory
     if (!fs.existsSync(outputPath)) {
-      throw new Error("Audio file was not created");
+      // Check if any .mp3 file was created recently in downloads directory
+      const files = fs.readdirSync(downloadsDir);
+      const recentMp3Files = files
+        .filter(f => f.endsWith('.mp3'))
+        .map(f => ({
+          name: f,
+          path: path.join(downloadsDir, f),
+          mtime: fs.statSync(path.join(downloadsDir, f)).mtime.getTime()
+        }))
+        .filter(f => f.mtime > startTime - 5000) // Created within 5 seconds of request start
+        .sort((a, b) => b.mtime - a.mtime); // Most recent first
+      
+      if (recentMp3Files.length > 0) {
+        // Use the most recently created file
+        const actualFile = recentMp3Files[0];
+        logger.info("File created with different name than expected", {
+          requestId,
+          expected: path.basename(outputPath),
+          actual: actualFile.name
+        });
+        // Update outputPath to the actual file
+        const actualPath = actualFile.path;
+        // Rename to expected name for consistency
+        fs.renameSync(actualPath, outputPath);
+      } else {
+        logger.error("Audio file was not created", {
+          requestId,
+          outputPath,
+          downloadsDirContents: files.slice(0, 10) // Show first 10 files for debugging
+        });
+        throw new Error("Audio file was not created. Check logs for yt-dlp errors.");
+      }
     }
 
     const fileName = path.basename(outputPath);
@@ -240,83 +414,9 @@ app.post("/extract", async (req: Request, res: Response) => {
           webViewLink: driveFileInfo.webViewLink
         });
 
-        // Delete local file after successful upload to save disk space
-        const deleteLocalFile = async (filePath: string, maxRetries = 3) => {
-          for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-              // Wait a bit longer on Windows to ensure file handles are released
-              await new Promise(resolve => setTimeout(resolve, attempt * 200));
-              
-              if (!fs.existsSync(filePath)) {
-                logger.info("Local file already deleted", {
-                  requestId,
-                  fileName,
-                  filePath,
-                  attempt
-                });
-                return true;
-              }
-              
-              const fileStats = fs.statSync(filePath);
-              
-              // Try to delete the file
-              fs.unlinkSync(filePath);
-              
-              // Verify deletion
-              await new Promise(resolve => setTimeout(resolve, 100));
-              if (!fs.existsSync(filePath)) {
-                logger.info("Local file deleted after successful Google Drive upload", {
-                  requestId,
-                  fileName,
-                  filePath,
-                  fileSize: `${(fileStats.size / 1024 / 1024).toFixed(2)} MB`,
-                  attempt
-                });
-                return true;
-              } else {
-                logger.warn("File still exists after deletion attempt", {
-                  requestId,
-                  fileName,
-                  filePath,
-                  attempt,
-                  maxRetries
-                });
-              }
-            } catch (deleteError) {
-              if (attempt === maxRetries) {
-                throw deleteError;
-              }
-              logger.warn("Deletion attempt failed, retrying", {
-                requestId,
-                fileName,
-                filePath,
-                attempt,
-                error: deleteError instanceof Error ? deleteError.message : String(deleteError)
-              });
-            }
-          }
-          return false;
-        };
-        
-        try {
-          const deleted = await deleteLocalFile(outputPath);
-          if (!deleted) {
-            logger.error("Failed to delete local file after multiple attempts (file is in Drive)", {
-              requestId,
-              fileName,
-              filePath: outputPath
-            });
-          }
-        } catch (deleteError) {
-          // Log error but don't fail the request - file is already uploaded to Drive
-          logger.error("Failed to delete local file after upload (file is in Drive)", {
-            requestId,
-            fileName,
-            filePath: outputPath,
-            error: deleteError instanceof Error ? deleteError.message : String(deleteError),
-            stack: deleteError instanceof Error ? deleteError.stack : undefined
-          });
-        }
+        // Optionally delete local file after successful upload
+        // Uncomment the following line if you want to delete local files after upload:
+        // fs.unlinkSync(outputPath);
       } catch (driveError) {
         logger.error("Failed to upload to Google Drive, keeping local file", {
           requestId,
