@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: audio-extractor-backend
+    ports:
+      - "0.0.0.0:5000:5000"  # Bind to all network interfaces for remote access
+    env_file:
+      - .env.prod  # Use production environment file
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - LOG_CONSOLE=true  # Enable console logging for Docker visibility
+      - DOCKER_CONTAINER=true  # Flag to help detect Docker environment
+      # Google Drive credentials loaded from .env.prod file
+      # Override here if needed:
+      # - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      # - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      # - GOOGLE_DRIVE_FOLDER_ID=${GOOGLE_DRIVE_FOLDER_ID:-}
+      # - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      # - GOOGLE_REFRESH_TOKEN=${GOOGLE_REFRESH_TOKEN:-}
+    volumes:
+      # Persist downloads directory
+      - ./downloads:/app/downloads
+      # Persist token.json for Google Drive authentication (mounted to dist where server looks for it)
+      - ./token.json:/app/dist/token.json
+      # Persist logs
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:5000/drive/status', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    # Optional: Resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: 2G
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 1G
+

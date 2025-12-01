@@ -17,18 +17,22 @@ const possibleEnvPaths = [
   path.join(process.cwd(), "Backend", ".env") // Backend subdirectory
 ];
 
-for (const envPath of possibleEnvPaths) {
-  if (fs.existsSync(envPath)) {
-    const result = dotenv.config({ path: envPath });
-    if (!result.error) {
-      break; // Successfully loaded, stop trying
+// Only load .env file if environment variables are not already set (Docker env_file takes precedence)
+if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REDIRECT_URI) {
+  for (const envPath of possibleEnvPaths) {
+    if (fs.existsSync(envPath)) {
+      // Use override: false to not override existing env vars (from Docker)
+      const result = dotenv.config({ path: envPath, override: false });
+      if (!result.error) {
+        break; // Successfully loaded, stop trying
+      }
     }
   }
-}
 
-// Also try default dotenv.config() as fallback
-if (!process.env.GOOGLE_CLIENT_ID) {
-  dotenv.config();
+  // Also try default dotenv.config() as fallback (only if needed)
+  if (!process.env.GOOGLE_CLIENT_ID) {
+    dotenv.config({ override: false });
+  }
 }
 
 import { google } from "googleapis";

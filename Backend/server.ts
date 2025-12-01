@@ -20,20 +20,31 @@ const possibleEnvPaths = [
 let envLoaded = false;
 let loadedEnvPath = null;
 
-for (const envPath of possibleEnvPaths) {
-  if (fs.existsSync(envPath)) {
-    const result = dotenv.config({ path: envPath });
-    if (!result.error) {
-      envLoaded = true;
-      loadedEnvPath = envPath;
-      break;
+// Only load .env file if environment variables are not already set (Docker env_file takes precedence)
+// Check if Docker has already set the env vars
+const hasDockerEnv = process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_REDIRECT_URI;
+
+if (!hasDockerEnv) {
+  for (const envPath of possibleEnvPaths) {
+    if (fs.existsSync(envPath)) {
+      // Use override: false to not override existing env vars (from Docker)
+      const result = dotenv.config({ path: envPath, override: false });
+      if (!result.error) {
+        envLoaded = true;
+        loadedEnvPath = envPath;
+        break;
+      }
     }
   }
-}
 
-// Also try default dotenv.config() as fallback
-if (!envLoaded) {
-  dotenv.config();
+  // Also try default dotenv.config() as fallback (only if needed)
+  if (!envLoaded) {
+    dotenv.config({ override: false });
+  }
+} else {
+  // Docker env vars are present, skip loading .env file
+  envLoaded = true;
+  loadedEnvPath = "Docker environment variables";
 }
 
 // Log environment loading status (before logger is imported)
