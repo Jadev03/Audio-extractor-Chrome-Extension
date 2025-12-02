@@ -625,7 +625,7 @@ app.get("/oauth2callback", async (req: Request, res: Response) => {
         });
         
         if (userInfoResponse.ok) {
-          const userData = await userInfoResponse.json();
+          const userData = await userInfoResponse.json() as { email?: string; id?: string };
           userEmail = userData.email || "Unknown";
           userId = userData.id || "unknown";
           
