@@ -18,9 +18,16 @@ function Popup() {
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
 
-  // Check authentication status on mount
+  // Check authentication status on mount and periodically
   useEffect(() => {
     checkAuthStatus();
+    
+    // Also check every 2 seconds in case OAuth just completed
+    const interval = setInterval(() => {
+      checkAuthStatus();
+    }, 2000);
+    
+    return () => clearInterval(interval);
   }, []);
 
   const checkAuthStatus = async () => {
@@ -43,6 +50,28 @@ function Popup() {
             return;
           }
         }
+      }
+      
+      // If no stored user, check backend for recently authenticated user
+      try {
+        const latestResponse = await fetch(`${BACKEND_URL}/auth/latest`);
+        if (latestResponse.ok) {
+          const latest = await latestResponse.json();
+          if (latest.userId && latest.email) {
+            // Store user info
+            localStorage.setItem("userId", latest.userId);
+            localStorage.setItem("userEmail", latest.email);
+            
+            setUserInfo({
+              email: latest.email,
+              id: latest.userId,
+              authenticated: true
+            });
+            return;
+          }
+        }
+      } catch (latestErr) {
+        console.log("Could not get latest user:", latestErr);
       }
       
       // Check if OAuth just completed (from callback page)
@@ -105,16 +134,19 @@ function Popup() {
       // Listen for tab updates to detect when OAuth completes
       const tabUpdateListener = (tabId: number, changeInfo: { url?: string; status?: string }) => {
         if (tabId === authTab.id && changeInfo.url?.includes("oauth2callback")) {
+          console.log("OAuth callback detected:", changeInfo.url);
           // OAuth callback happened
           chrome.tabs.onUpdated.removeListener(tabUpdateListener);
           
           // Wait for backend to process OAuth and get user info
           setTimeout(async () => {
             try {
+              console.log("Checking for authenticated user...");
               // Get latest authenticated user from backend
               await checkAuthStatusAfterOAuth();
               setAuthLoading(false);
             } catch (err) {
+              console.error("Error checking auth status:", err);
               // Fallback: check backend directly
               await checkAuthStatusAfterOAuth();
               setAuthLoading(false);
@@ -128,11 +160,17 @@ function Popup() {
       // Helper function to check auth status after OAuth
       const checkAuthStatusAfterOAuth = async () => {
         try {
+          console.log("Fetching latest authenticated user from backend...");
           // Get latest authenticated user from backend
           const latestResponse = await fetch(`${BACKEND_URL}/auth/latest`);
+          console.log("Latest response status:", latestResponse.status);
+          
           if (latestResponse.ok) {
             const latest = await latestResponse.json();
+            console.log("Latest user data:", latest);
+            
             if (latest.userId && latest.email) {
+              console.log("Storing user info:", latest.userId, latest.email);
               // Store user info
               localStorage.setItem("userId", latest.userId);
               localStorage.setItem("userEmail", latest.email);
@@ -141,7 +179,11 @@ function Popup() {
               await checkAuthStatus();
               
               // Close the auth tab
-              chrome.tabs.remove(authTab.id!);
+              try {
+                chrome.tabs.remove(authTab.id!);
+              } catch (e) {
+                console.log("Tab already closed");
+              }
               
               // Show success notification
               chrome.notifications.create({
@@ -151,7 +193,38 @@ function Popup() {
                 message: `Logged in as ${latest.email}`
               });
               return;
+            } else {
+              console.log("No user data in response, trying again in 2 seconds...");
+              // Retry after 2 more seconds
+              setTimeout(async () => {
+                const retryResponse = await fetch(`${BACKEND_URL}/auth/latest`);
+                if (retryResponse.ok) {
+                  const retryData = await retryResponse.json();
+                  if (retryData.userId && retryData.email) {
+                    localStorage.setItem("userId", retryData.userId);
+                    localStorage.setItem("userEmail", retryData.email);
+                    await checkAuthStatus();
+                    try {
+                      chrome.tabs.remove(authTab.id!);
+                    } catch (e) {}
+                    chrome.notifications.create({
+                      type: "basic",
+                      iconUrl: chrome.runtime.getURL("/vite.svg"),
+                      title: "✅ Authentication Successful!",
+                      message: `Logged in as ${retryData.email}`
+                    });
+                    return;
+                  }
+                }
+                // Final fallback
+                await checkAuthStatus();
+                try {
+                  chrome.tabs.remove(authTab.id!);
+                } catch (e) {}
+              }, 2000);
             }
+          } else {
+            console.error("Failed to get latest user, status:", latestResponse.status);
           }
         } catch (err) {
           console.error("Error getting latest user:", err);
@@ -159,7 +232,9 @@ function Popup() {
         
         // Fallback: just refresh
         await checkAuthStatus();
-        chrome.tabs.remove(authTab.id!);
+        try {
+          chrome.tabs.remove(authTab.id!);
+        } catch (e) {}
         
         chrome.notifications.create({
           type: "basic",
@@ -274,6 +349,13 @@ function Popup() {
         {userInfo?.authenticated ? (
           <div className="auth-status authenticated">
             <span>✅ Logged in as: {userInfo.email}</span>
+            <button 
+              onClick={checkAuthStatus} 
+              className="auth-button"
+              style={{ marginTop: "8px", fontSize: "12px", padding: "6px 12px" }}
+            >
+              🔄 Refresh
+            </button>
           </div>
         ) : (
           <div className="auth-status not-authenticated">
@@ -284,6 +366,13 @@ function Popup() {
               className="auth-button"
             >
               {authLoading ? "Authenticating..." : "🔐 Sign in with Google"}
+            </button>
+            <button 
+              onClick={checkAuthStatus} 
+              className="auth-button"
+              style={{ marginTop: "8px", fontSize: "12px", padding: "6px 12px", backgroundColor: "#666" }}
+            >
+              🔄 Check Status
             </button>
           </div>
         )}

@@ -603,14 +603,23 @@ app.get("/auth/latest", (req: Request, res: Response) => {
     const latestFile = files[0];
     const tokenData = JSON.parse(fs.readFileSync(latestFile.path, "utf8"));
     
-    // Only return if modified in last 5 minutes (recently authenticated)
-    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
-    if (latestFile.mtime > fiveMinutesAgo) {
+    // Return the most recent user (check last 10 minutes to be safe)
+    const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+    if (latestFile.mtime > tenMinutesAgo) {
+      logger.info("Returning latest authenticated user", {
+        userId: tokenData.userId,
+        email: tokenData.email,
+        fileModified: new Date(latestFile.mtime).toISOString()
+      });
       res.json({
         userId: tokenData.userId || null,
         email: tokenData.email || null
       });
     } else {
+      logger.info("Latest user token is too old", {
+        fileModified: new Date(latestFile.mtime).toISOString(),
+        tenMinutesAgo: new Date(tenMinutesAgo).toISOString()
+      });
       res.json({ userId: null, email: null });
     }
   } catch (error) {
