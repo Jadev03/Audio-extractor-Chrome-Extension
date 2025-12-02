@@ -292,81 +292,148 @@ app.post("/extract", async (req: Request, res: Response) => {
 
     // Use python -m yt_dlp if yt-dlp is not in PATH (preferred in Docker)
     if (usePythonModule) {
-      // Execute using python -m yt_dlp with ffmpeg location and proper format selection
-      // Use spawnSync to avoid shell parsing issues on Windows
+      // Try multiple player clients to avoid bot detection
+      const playerClients = ["ios", "android", "web", "mweb"];
+      let lastError: Error | null = null;
+      let lastStderr = "";
+      let lastStdout = "";
+      
       const pythonCmd = process.platform === "win32" ? "python" : "python3";
-      const args: string[] = [
-        "-m", "yt_dlp",
-        cleanedUrl, // Use cleaned URL without playlist parameters
-        "--no-playlist", // Only download single video, not entire playlist
-        "--extract-audio", // Extract audio only
-        "--audio-format", "mp3", // Convert to MP3
-        "--audio-quality", "0", // Best quality
-        "--format", "bestaudio[ext=m4a]/bestaudio/best[height<=720]/best", // Better format selection with fallbacks
-        "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
-        "--output", outputPath,
-        "--verbose", // Keep verbose for debugging
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", // Better user agent
-        "--extractor-args", "youtube:player_client=ios" // Use iOS client to avoid bot detection (works better than android/web)
-      ];
       
-      // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
-      if (ffmpegDir && ffmpegDir !== "") {
-        args.splice(2, 0, "--ffmpeg-location", ffmpegDir);
-      }
-      
-      logger.info("Executing yt-dlp with python module", {
-        requestId,
-        command: `${pythonCmd} ${args.join(" ")}`,
-        outputPath
-      });
-      
-      const result = spawnSync(pythonCmd, args, {
-        stdio: "pipe", // Capture output for error messages
-        shell: false,
-        encoding: "utf8",
-        timeout: 300000 // 5 minute timeout
-      });
-      
-      // Log output for debugging
-      const stdout = result.stdout?.toString() || "";
-      const stderr = result.stderr?.toString() || "";
-      
-      if (stdout) {
-        logger.info("yt-dlp stdout", {
+      for (let i = 0; i < playerClients.length; i++) {
+        const client = playerClients[i];
+        logger.info(`Attempting extraction with ${client} client (attempt ${i + 1}/${playerClients.length})`, {
           requestId,
-          output: stdout.substring(0, 2000) // Increased to 2000 chars
+          client
         });
-      }
-      if (stderr) {
-        logger.warn("yt-dlp stderr", {
-          requestId,
-          error: stderr.substring(0, 2000) // Increased to 2000 chars
-        });
-      }
-      
-      if (result.error) {
-        logger.error("yt-dlp spawn error", {
-          requestId,
-          error: result.error.message,
-          stack: result.error.stack
-        });
-        throw result.error;
-      }
-      
-      if (result.status !== 0) {
-        // Parse the actual error message from yt-dlp output
-        // yt-dlp errors usually appear after debug info, look for ERROR, WARNING, or exception messages
-        let errorMessage = "Unknown error";
-        const fullOutput = stderr + "\n" + stdout;
         
-        // Try to extract the actual error (usually after [youtube] or ERROR:)
-        // Look for ERROR: lines first (most specific)
+        const args: string[] = [
+          "-m", "yt_dlp",
+          cleanedUrl, // Use cleaned URL without playlist parameters
+          "--no-playlist", // Only download single video, not entire playlist
+          "--extract-audio", // Extract audio only
+          "--audio-format", "mp3", // Convert to MP3
+          "--audio-quality", "0", // Best quality
+          "--format", "bestaudio[ext=m4a]/bestaudio/best[height<=720]/best", // Better format selection with fallbacks
+          "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
+          "--output", outputPath,
+          "--verbose", // Keep verbose for debugging
+          "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", // Better user agent
+          "--extractor-args", `youtube:player_client=${client}` // Try different player clients
+        ];
+        
+        // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
+        if (ffmpegDir && ffmpegDir !== "") {
+          args.splice(2, 0, "--ffmpeg-location", ffmpegDir);
+        }
+        
+        const result = spawnSync(pythonCmd, args, {
+          stdio: "pipe", // Capture output for error messages
+          shell: false,
+          encoding: "utf8",
+          timeout: 300000 // 5 minute timeout
+        });
+        
+        // Log output for debugging
+        const stdout = result.stdout?.toString() || "";
+        const stderr = result.stderr?.toString() || "";
+        
+        if (result.error) {
+          logger.error("yt-dlp spawn error", {
+            requestId,
+            client,
+            error: result.error.message,
+            stack: result.error.stack
+          });
+          lastError = result.error;
+          continue; // Try next client
+        }
+        
+        if (result.status === 0) {
+          // Success! Log and break
+          logger.info(`yt-dlp execution completed successfully with ${client} client`, { 
+            requestId,
+            client 
+          });
+          if (stdout) {
+            logger.info("yt-dlp stdout", {
+              requestId,
+              output: stdout.substring(0, 2000)
+            });
+          }
+          break; // Success, exit loop
+        }
+        
+        // Check if it's a bot detection error
+        const fullOutput = stderr + "\n" + stdout;
+        const isBotError = fullOutput.toLowerCase().includes("sign in to confirm") || 
+                          fullOutput.toLowerCase().includes("not a bot") ||
+                          fullOutput.toLowerCase().includes("login_required");
+        
+        // Store error info
+        lastStderr = stderr;
+        lastStdout = stdout;
+        
+        if (isBotError && i < playerClients.length - 1) {
+          // Bot detection error and we have more clients to try
+          logger.warn(`Bot detection with ${client} client, trying next client`, {
+            requestId,
+            client,
+            attempt: i + 1
+          });
+          continue; // Try next client
+        } else if (i < playerClients.length - 1) {
+          // Not a bot error, but we have more clients - try next one
+          logger.warn(`Extraction failed with ${client} client, trying next client`, {
+            requestId,
+            client,
+            attempt: i + 1,
+            exitCode: result.status
+          });
+          continue; // Try next client
+        } else {
+          // Last client failed - parse and throw error
+          let errorMessage = "Unknown error";
+          const errorMatch = fullOutput.match(/ERROR:\s*\[youtube\]\s*.+?:\s*(.+?)(?:\n|$)/i);
+          if (errorMatch) {
+            errorMessage = errorMatch[1].trim();
+          } else {
+            // Look for common error patterns
+            const patterns = [
+              /Sign in to confirm you['']re not a bot(.+?)(?:\n|$)/i,
+              /Sign in to confirm your age(.+?)(?:\n|$)/i,
+              /Video unavailable(.+?)(?:\n|$)/i,
+              /Private video(.+?)(?:\n|$)/i,
+              /Age-restricted(.+?)(?:\n|$)/i,
+              /Region blocked(.+?)(?:\n|$)/i,
+              /Unable to download(.+?)(?:\n|$)/i,
+              /LOGIN_REQUIRED/i
+            ];
+            
+            for (const pattern of patterns) {
+              const match = fullOutput.match(pattern);
+              if (match) {
+                errorMessage = match[0].trim();
+                break;
+              }
+            }
+          }
+          
+          lastError = new Error(errorMessage);
+          break; // Exit loop with this error
+        }
+      }
+      
+      // If we exhausted all clients and still have an error, throw it
+      if (lastError || (lastStderr && lastStdout)) {
+        const fullOutput = lastStderr + "\n" + lastStdout;
+        let errorMessage = "Unknown error";
+        
+        // Parse error from last attempt
         const errorMatch = fullOutput.match(/ERROR:\s*\[youtube\]\s*.+?:\s*(.+?)(?:\n|$)/i);
         if (errorMatch) {
           errorMessage = errorMatch[1].trim();
         } else {
-          // Look for common error patterns (order matters - most specific first)
           const patterns = [
             /Sign in to confirm you['']re not a bot(.+?)(?:\n|$)/i,
             /Sign in to confirm your age(.+?)(?:\n|$)/i,
@@ -385,29 +452,6 @@ app.post("/extract", async (req: Request, res: Response) => {
               break;
             }
           }
-          
-          // If no pattern matches, use the last non-debug line
-          const lines = fullOutput.split('\n').filter(line => 
-            line.trim() && 
-            !line.includes('[debug]') && 
-            !line.includes('Command-line config') &&
-            !line.includes('Encodings:') &&
-            !line.includes('yt-dlp version') &&
-            !line.includes('Python') &&
-            !line.includes('exe versions:') &&
-            !line.includes('Optional libraries:') &&
-            !line.includes('JS runtimes:') &&
-            !line.includes('Proxy map:') &&
-            !line.includes('Request Handlers:') &&
-            !line.includes('Plugin directories:') &&
-            !line.includes('Loaded') &&
-            !line.includes('Token Providers:') &&
-            !line.includes('Token Cache Providers:')
-          );
-          
-          if (lines.length > 0) {
-            errorMessage = lines[lines.length - 1].trim();
-          }
         }
         
         // Make error message more user-friendly
@@ -424,13 +468,12 @@ app.post("/extract", async (req: Request, res: Response) => {
           userFriendlyError = "This video is not available in your region or has been removed.";
         }
         
-        logger.error("yt-dlp execution failed", {
+        logger.error("yt-dlp execution failed after trying all player clients", {
           requestId,
-          exitCode: result.status,
           parsedError: errorMessage,
           userFriendlyError,
-          fullStderr: stderr.substring(0, 3000), // Full stderr for debugging
-          fullStdout: stdout.substring(0, 3000)  // Full stdout for debugging
+          fullStderr: lastStderr.substring(0, 3000),
+          fullStdout: lastStdout.substring(0, 3000)
         });
         
         throw new Error(userFriendlyError);
