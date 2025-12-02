@@ -671,24 +671,68 @@ app.get("/oauth2callback", async (req: Request, res: Response) => {
     
     if (tokenData.access_token) {
       try {
+        // Try the userinfo endpoint
         const userInfoResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
           headers: {
             Authorization: `Bearer ${tokenData.access_token}`
           }
         });
         
+        logger.info("User info API response", {
+          status: userInfoResponse.status,
+          statusText: userInfoResponse.statusText,
+          ok: userInfoResponse.ok
+        });
+        
         if (userInfoResponse.ok) {
-          const userData = await userInfoResponse.json() as { email?: string; id?: string };
+          const userData = await userInfoResponse.json() as { email?: string; id?: string; name?: string };
           userEmail = userData.email || "Unknown";
           userId = userData.id || "unknown";
+          
+          logger.info("User info retrieved successfully", { userId, email: userEmail, name: userData.name });
           
           // Save user token
           saveUserToken(userId, userEmail, tokenData.access_token, tokenData.refresh_token);
           logger.info("User token saved from OAuth callback", { userId, email: userEmail });
+        } else {
+          // Try to get error details
+          const errorText = await userInfoResponse.text().catch(() => "Unknown error");
+          logger.warn("Failed to get user info from API", {
+            status: userInfoResponse.status,
+            statusText: userInfoResponse.statusText,
+            error: errorText.substring(0, 200)
+          });
+          
+          // Try alternative: use Google Drive API to get user info
+          try {
+            const driveResponse = await fetch("https://www.googleapis.com/drive/v3/about?fields=user", {
+              headers: {
+                Authorization: `Bearer ${tokenData.access_token}`
+              }
+            });
+            
+            if (driveResponse.ok) {
+              const driveData = await driveResponse.json() as { user?: { emailAddress?: string; displayName?: string; permissionId?: string } };
+              if (driveData.user?.emailAddress) {
+                userEmail = driveData.user.emailAddress;
+                userId = driveData.user.permissionId || userEmail.split("@")[0] || "unknown";
+                logger.info("User info retrieved from Drive API", { userId, email: userEmail });
+                
+                // Save user token
+                saveUserToken(userId, userEmail, tokenData.access_token, tokenData.refresh_token);
+                logger.info("User token saved from OAuth callback (via Drive API)", { userId, email: userEmail });
+              }
+            }
+          } catch (driveError) {
+            logger.warn("Failed to get user info from Drive API", {
+              error: driveError instanceof Error ? driveError.message : String(driveError)
+            });
+          }
         }
       } catch (userInfoError) {
-        logger.warn("Failed to get user info, but token saved", {
-          error: userInfoError instanceof Error ? userInfoError.message : String(userInfoError)
+        logger.error("Error getting user info", {
+          error: userInfoError instanceof Error ? userInfoError.message : String(userInfoError),
+          stack: userInfoError instanceof Error ? userInfoError.stack : undefined
         });
       }
     }

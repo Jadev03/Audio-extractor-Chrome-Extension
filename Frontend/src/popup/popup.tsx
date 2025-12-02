@@ -54,10 +54,36 @@ function Popup() {
       
       // If no stored user, check backend for recently authenticated user
       try {
-        const latestResponse = await fetch(`${BACKEND_URL}/auth/latest`);
-        if (latestResponse.ok) {
-          const latest = await latestResponse.json();
-          if (latest.userId && latest.email) {
+        // Add cache-busting to prevent 304 responses
+        const latestResponse = await fetch(`${BACKEND_URL}/auth/latest?t=${Date.now()}`, {
+          cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+          }
+        });
+        if (latestResponse.ok || latestResponse.status === 304) {
+          // Handle 304 by using cached data or retrying without cache
+          let latest;
+          if (latestResponse.status === 304) {
+            // 304 means not modified, try again with fresh request
+            const freshResponse = await fetch(`${BACKEND_URL}/auth/latest?t=${Date.now()}`, {
+              cache: 'reload',
+              headers: {
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache'
+              }
+            });
+            if (freshResponse.ok) {
+              latest = await freshResponse.json();
+            } else {
+              return; // Skip if still failing
+            }
+          } else {
+            latest = await latestResponse.json();
+          }
+          
+          if (latest && latest.userId && latest.email) {
             // Store user info
             localStorage.setItem("userId", latest.userId);
             localStorage.setItem("userEmail", latest.email);
@@ -139,19 +165,82 @@ function Popup() {
           chrome.tabs.onUpdated.removeListener(tabUpdateListener);
           
           // Wait for backend to process OAuth and get user info
-          setTimeout(async () => {
+          // Try multiple times with increasing delays to handle backend processing time
+          let retryCount = 0;
+          const maxRetries = 5;
+          
+          const tryGetAuthStatus = async () => {
             try {
-              console.log("Checking for authenticated user...");
-              // Get latest authenticated user from backend
-              await checkAuthStatusAfterOAuth();
-              setAuthLoading(false);
+              console.log(`Checking for authenticated user (attempt ${retryCount + 1}/${maxRetries})...`);
+              const latestResponse = await fetch(`${BACKEND_URL}/auth/latest?t=${Date.now()}`, {
+                cache: 'no-store',
+                headers: {
+                  'Cache-Control': 'no-cache, no-store, must-revalidate',
+                  'Pragma': 'no-cache'
+                }
+              });
+              
+              let latest;
+              if (latestResponse.status === 304) {
+                // Force fresh request
+                const freshResponse = await fetch(`${BACKEND_URL}/auth/latest?t=${Date.now()}`, {
+                  cache: 'reload',
+                  headers: {
+                    'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    'Pragma': 'no-cache',
+                    'If-None-Match': ''
+                  }
+                });
+                if (freshResponse.ok) {
+                  latest = await freshResponse.json();
+                }
+              } else if (latestResponse.ok) {
+                latest = await latestResponse.json();
+              }
+              
+              if (latest && latest.userId && latest.email) {
+                console.log("✅ User authenticated:", latest.email);
+                localStorage.setItem("userId", latest.userId);
+                localStorage.setItem("userEmail", latest.email);
+                await checkAuthStatus();
+                setAuthLoading(false);
+                try {
+                  chrome.tabs.remove(authTab.id!);
+                } catch (e) {
+                  console.log("Tab already closed");
+                }
+                chrome.notifications.create({
+                  type: "basic",
+                  iconUrl: chrome.runtime.getURL("/vite.svg"),
+                  title: "✅ Authentication Successful!",
+                  message: `Logged in as ${latest.email}`
+                });
+                return;
+              }
+              
+              // If no user yet, retry
+              retryCount++;
+              if (retryCount < maxRetries) {
+                setTimeout(tryGetAuthStatus, 2000); // Wait 2 seconds before retry
+              } else {
+                console.log("Max retries reached, using fallback");
+                await checkAuthStatusAfterOAuth();
+                setAuthLoading(false);
+              }
             } catch (err) {
               console.error("Error checking auth status:", err);
-              // Fallback: check backend directly
-              await checkAuthStatusAfterOAuth();
-              setAuthLoading(false);
+              retryCount++;
+              if (retryCount < maxRetries) {
+                setTimeout(tryGetAuthStatus, 2000);
+              } else {
+                await checkAuthStatusAfterOAuth();
+                setAuthLoading(false);
+              }
             }
-          }, 3000);
+          };
+          
+          // Start checking after 2 seconds
+          setTimeout(tryGetAuthStatus, 2000);
         }
       };
 
@@ -161,70 +250,113 @@ function Popup() {
       const checkAuthStatusAfterOAuth = async () => {
         try {
           console.log("Fetching latest authenticated user from backend...");
-          // Get latest authenticated user from backend
-          const latestResponse = await fetch(`${BACKEND_URL}/auth/latest`);
+          // Get latest authenticated user from backend with cache-busting
+          const latestResponse = await fetch(`${BACKEND_URL}/auth/latest?t=${Date.now()}`, {
+            cache: 'no-store',
+            headers: {
+              'Cache-Control': 'no-cache, no-store, must-revalidate',
+              'Pragma': 'no-cache'
+            }
+          });
           console.log("Latest response status:", latestResponse.status);
           
-          if (latestResponse.ok) {
-            const latest = await latestResponse.json();
-            console.log("Latest user data:", latest);
+          let latest;
+          if (latestResponse.status === 304) {
+            // 304 means cached, force a fresh request
+            console.log("Got 304, forcing fresh request...");
+            const freshResponse = await fetch(`${BACKEND_URL}/auth/latest?t=${Date.now()}`, {
+              cache: 'reload',
+              headers: {
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'If-None-Match': ''
+              }
+            });
+            if (freshResponse.ok) {
+              latest = await freshResponse.json();
+            }
+          } else if (latestResponse.ok) {
+            latest = await latestResponse.json();
+          }
+          
+          console.log("Latest user data:", latest);
+          
+          if (latest && latest.userId && latest.email) {
+            console.log("Storing user info:", latest.userId, latest.email);
+            // Store user info
+            localStorage.setItem("userId", latest.userId);
+            localStorage.setItem("userEmail", latest.email);
             
-            if (latest.userId && latest.email) {
-              console.log("Storing user info:", latest.userId, latest.email);
-              // Store user info
-              localStorage.setItem("userId", latest.userId);
-              localStorage.setItem("userEmail", latest.email);
-              
-              // Refresh auth status
+            // Refresh auth status
+            await checkAuthStatus();
+            
+            // Close the auth tab
+            try {
+              chrome.tabs.remove(authTab.id!);
+            } catch (e) {
+              console.log("Tab already closed");
+            }
+            
+            // Show success notification
+            chrome.notifications.create({
+              type: "basic",
+              iconUrl: chrome.runtime.getURL("/vite.svg"),
+              title: "✅ Authentication Successful!",
+              message: `Logged in as ${latest.email}`
+            });
+            return;
+          } else {
+            console.log("No user data in response, trying again in 2 seconds...");
+            // Retry after 2 more seconds with fresh request
+            setTimeout(async () => {
+              const retryResponse = await fetch(`${BACKEND_URL}/auth/latest?t=${Date.now()}`, {
+                cache: 'reload',
+                headers: {
+                  'Cache-Control': 'no-cache, no-store, must-revalidate',
+                  'Pragma': 'no-cache'
+                }
+              });
+              if (retryResponse.ok || retryResponse.status === 304) {
+                let retryData;
+                if (retryResponse.status === 304) {
+                  // Force fresh request
+                  const freshRetry = await fetch(`${BACKEND_URL}/auth/latest?t=${Date.now()}`, {
+                    cache: 'reload',
+                    headers: {
+                      'Cache-Control': 'no-cache, no-store, must-revalidate',
+                      'Pragma': 'no-cache',
+                      'If-None-Match': ''
+                    }
+                  });
+                  if (freshRetry.ok) {
+                    retryData = await freshRetry.json();
+                  }
+                } else {
+                  retryData = await retryResponse.json();
+                }
+                
+                if (retryData && retryData.userId && retryData.email) {
+                  localStorage.setItem("userId", retryData.userId);
+                  localStorage.setItem("userEmail", retryData.email);
+                  await checkAuthStatus();
+                  try {
+                    chrome.tabs.remove(authTab.id!);
+                  } catch (e) {}
+                  chrome.notifications.create({
+                    type: "basic",
+                    iconUrl: chrome.runtime.getURL("/vite.svg"),
+                    title: "✅ Authentication Successful!",
+                    message: `Logged in as ${retryData.email}`
+                  });
+                  return;
+                }
+              }
+              // Final fallback
               await checkAuthStatus();
-              
-              // Close the auth tab
               try {
                 chrome.tabs.remove(authTab.id!);
-              } catch (e) {
-                console.log("Tab already closed");
-              }
-              
-              // Show success notification
-              chrome.notifications.create({
-                type: "basic",
-                iconUrl: chrome.runtime.getURL("/vite.svg"),
-                title: "✅ Authentication Successful!",
-                message: `Logged in as ${latest.email}`
-              });
-              return;
-            } else {
-              console.log("No user data in response, trying again in 2 seconds...");
-              // Retry after 2 more seconds
-              setTimeout(async () => {
-                const retryResponse = await fetch(`${BACKEND_URL}/auth/latest`);
-                if (retryResponse.ok) {
-                  const retryData = await retryResponse.json();
-                  if (retryData.userId && retryData.email) {
-                    localStorage.setItem("userId", retryData.userId);
-                    localStorage.setItem("userEmail", retryData.email);
-                    await checkAuthStatus();
-                    try {
-                      chrome.tabs.remove(authTab.id!);
-                    } catch (e) {}
-                    chrome.notifications.create({
-                      type: "basic",
-                      iconUrl: chrome.runtime.getURL("/vite.svg"),
-                      title: "✅ Authentication Successful!",
-                      message: `Logged in as ${retryData.email}`
-                    });
-                    return;
-                  }
-                }
-                // Final fallback
-                await checkAuthStatus();
-                try {
-                  chrome.tabs.remove(authTab.id!);
-                } catch (e) {}
-              }, 2000);
-            }
-          } else {
-            console.error("Failed to get latest user, status:", latestResponse.status);
+              } catch (e) {}
+            }, 2000);
           }
         } catch (err) {
           console.error("Error getting latest user:", err);
@@ -279,9 +411,21 @@ function Popup() {
       return;
     }
 
-    // Check if user is authenticated
-    if (!userInfo?.authenticated || !userInfo?.id) {
-      setError("Please authenticate with Google first");
+    // Check if user is authenticated - refresh status first
+    await checkAuthStatus();
+    
+    // Re-check after refresh (need to wait a bit for state update)
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Get fresh user info from localStorage as fallback
+    const storedUserId = localStorage.getItem("userId");
+    const storedEmail = localStorage.getItem("userEmail");
+    
+    const currentUserId = userInfo?.id || storedUserId;
+    const currentUserEmail = userInfo?.email || storedEmail;
+    
+    if (!currentUserId) {
+      setError("Please authenticate with Google first. Click 'Sign in with Google' button.");
       return;
     }
 
@@ -296,8 +440,8 @@ function Popup() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
           youtubeUrl: videoUrl,
-          userId: userInfo.id,
-          userEmail: userInfo.email
+          userId: currentUserId,
+          userEmail: currentUserEmail || ""
         })
       });
 
@@ -319,7 +463,7 @@ function Popup() {
             type: "basic",
             iconUrl: chrome.runtime.getURL("/vite.svg"),
             title: "✅ Audio Extraction Complete!",
-            message: `Uploaded to Google Drive as ${userInfo.email}`
+            message: `Uploaded to Google Drive as ${currentUserEmail || "your account"}`
           });
         } catch (e) {
           console.log("Notification failed:", e);
@@ -378,7 +522,7 @@ function Popup() {
         )}
       </div>
 
-      <button onClick={getYouTubeUrl} disabled={loading || !userInfo?.authenticated}>
+      <button onClick={getYouTubeUrl} disabled={loading}>
         Detect YouTube URL
       </button>
 
@@ -386,7 +530,7 @@ function Popup() {
 
       <button 
         onClick={extractAudio} 
-        disabled={loading || !videoUrl || !userInfo?.authenticated}
+        disabled={loading || !videoUrl || (!userInfo?.authenticated && !localStorage.getItem("userId"))}
         className="extract-button"
       >
         {loading ? "Extracting..." : "Extract Audio"}
