@@ -102,3 +102,34 @@
   margin-bottom: 0;
 }
 
+.auth-section {
+  margin-bottom: 16px;
+  padding: 12px;
+  background-color: #f8f9fa;
+  border-radius: 4px;
+  border: 1px solid #dadce0;
+}
+
+.auth-status {
+  font-size: 12px;
+  text-align: center;
+}
+
+.auth-status.authenticated {
+  color: #34a853;
+  font-weight: 500;
+}
+
+.auth-status.not-authenticated {
+  color: #ea4335;
+}
+
+.auth-button {
+  margin-top: 8px;
+  background-color: #4285f4 !important;
+}
+
+.auth-button:hover:not(:disabled) {
+  background-color: #357ae8 !important;
+}
+

@@ -1,5 +1,13 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./popup.css";
+
+const BACKEND_URL = "http://13.200.189.31:5000";
+
+interface UserInfo {
+  email: string;
+  id: string;
+  authenticated: boolean;
+}
 
 function Popup() {
   const [videoUrl, setVideoUrl] = useState("");
@@ -7,6 +15,143 @@ function Popup() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
+  const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // Check authentication status on mount
+  useEffect(() => {
+    checkAuthStatus();
+  }, []);
+
+  const checkAuthStatus = async () => {
+    try {
+      // Check localStorage for user info (set by OAuth callback page)
+      const storedUserId = localStorage.getItem("userId");
+      const storedEmail = localStorage.getItem("userEmail");
+      
+      if (storedUserId && storedEmail) {
+        // Verify with backend that token is still valid
+        const statusResponse = await fetch(`${BACKEND_URL}/auth/user/${storedUserId}`);
+        if (statusResponse.ok) {
+          const status = await statusResponse.json();
+          if (status.authenticated) {
+            setUserInfo({
+              email: storedEmail,
+              id: storedUserId,
+              authenticated: true
+            });
+            return;
+          }
+        }
+      }
+      
+      // Check if OAuth just completed (from callback page)
+      const oauthComplete = localStorage.getItem("oauth_complete");
+      if (oauthComplete === "true") {
+        const oauthUserId = localStorage.getItem("oauth_userId");
+        const oauthEmail = localStorage.getItem("oauth_userEmail");
+        
+        if (oauthUserId && oauthEmail) {
+          // Store in regular storage
+          localStorage.setItem("userId", oauthUserId);
+          localStorage.setItem("userEmail", oauthEmail);
+          localStorage.removeItem("oauth_complete");
+          localStorage.removeItem("oauth_userId");
+          localStorage.removeItem("oauth_userEmail");
+          
+          setUserInfo({
+            email: oauthEmail,
+            id: oauthUserId,
+            authenticated: true
+          });
+          return;
+        }
+      }
+      
+      setUserInfo({
+        email: "",
+        id: "",
+        authenticated: false
+      });
+    } catch (err) {
+      console.error("Auth check error:", err);
+      setUserInfo({
+        email: "",
+        id: "",
+        authenticated: false
+      });
+    }
+  };
+
+  const authenticateUser = async () => {
+    setAuthLoading(true);
+    setError("");
+
+    try {
+      // Get OAuth URL from backend
+      const authUrlResponse = await fetch(`${BACKEND_URL}/auth/google`);
+      if (!authUrlResponse.ok) {
+        throw new Error("Failed to get authentication URL");
+      }
+
+      const { authUrl } = await authUrlResponse.json();
+
+      // Open OAuth flow in a new tab
+      const authTab = await chrome.tabs.create({
+        url: authUrl,
+        active: true
+      });
+
+      // Listen for tab updates to detect when OAuth completes
+      const tabUpdateListener = (tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+        if (tabId === authTab.id && changeInfo.url?.includes("oauth2callback")) {
+          // OAuth callback happened
+          chrome.tabs.onUpdated.removeListener(tabUpdateListener);
+          
+          // Wait a bit for the callback page to set localStorage
+          setTimeout(async () => {
+            // Check if user info was stored
+            const oauthComplete = localStorage.getItem("oauth_complete");
+            if (oauthComplete === "true") {
+              // Refresh auth status
+              await checkAuthStatus();
+              
+              // Close the auth tab
+              chrome.tabs.remove(authTab.id!);
+              
+              // Show success notification
+              chrome.notifications.create({
+                type: "basic",
+                iconUrl: chrome.runtime.getURL("/vite.svg"),
+                title: "✅ Authentication Successful!",
+                message: "You can now extract audio files"
+              });
+            }
+            
+            setAuthLoading(false);
+          }, 2000);
+        }
+      };
+
+      chrome.tabs.onUpdated.addListener(tabUpdateListener);
+
+      // Also listen for tab removal (user closed it)
+      const tabRemoveListener = (tabId: number) => {
+        if (tabId === authTab.id) {
+          chrome.tabs.onRemoved.removeListener(tabRemoveListener);
+          chrome.tabs.onUpdated.removeListener(tabUpdateListener);
+          setAuthLoading(false);
+        }
+      };
+
+      chrome.tabs.onRemoved.addListener(tabRemoveListener);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Authentication failed";
+      setError(errorMessage);
+      console.error("Authentication error:", err);
+      setAuthLoading(false);
+    }
+  };
 
   const getYouTubeUrl = () => {
     chrome.runtime.sendMessage({ type: "GET_YT_URL" }, (response: { url?: string }) => {
@@ -25,16 +170,26 @@ function Popup() {
       return;
     }
 
+    // Check if user is authenticated
+    if (!userInfo?.authenticated || !userInfo?.id) {
+      setError("Please authenticate with Google first");
+      return;
+    }
+
     setLoading(true);
     setError("");
     setDownloadUrl("");
     setSuccess(false);
 
     try {
-      const res = await fetch("http://13.200.189.31:5000/extract", {
+      const res = await fetch(`${BACKEND_URL}/extract`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ youtubeUrl: videoUrl })
+        body: JSON.stringify({ 
+          youtubeUrl: videoUrl,
+          userId: userInfo.id,
+          userEmail: userInfo.email
+        })
       });
 
       if (!res.ok) {
@@ -55,7 +210,7 @@ function Popup() {
             type: "basic",
             iconUrl: chrome.runtime.getURL("/vite.svg"),
             title: "✅ Audio Extraction Complete!",
-            message: "Your audio file is ready to download. Click the download button in the extension popup."
+            message: `Uploaded to Google Drive as ${userInfo.email}`
           });
         } catch (e) {
           console.log("Notification failed:", e);
@@ -69,7 +224,7 @@ function Popup() {
       setError(errorMessage);
       
       if (errorMessage.includes("Failed to fetch") || errorMessage.includes("NetworkError")) {
-        setError("Cannot connect to backend server. Make sure it's running on http://localhost:5000");
+        setError("Cannot connect to backend server. Make sure it's running.");
       }
     } finally {
       setLoading(false);
@@ -80,7 +235,27 @@ function Popup() {
     <div className="popup-container">
       <h3>YouTube Audio Extractor</h3>
 
-      <button onClick={getYouTubeUrl} disabled={loading}>
+      {/* Authentication Section */}
+      <div className="auth-section">
+        {userInfo?.authenticated ? (
+          <div className="auth-status authenticated">
+            <span>✅ Logged in as: {userInfo.email}</span>
+          </div>
+        ) : (
+          <div className="auth-status not-authenticated">
+            <p>🔒 Please authenticate with Google</p>
+            <button 
+              onClick={authenticateUser} 
+              disabled={authLoading}
+              className="auth-button"
+            >
+              {authLoading ? "Authenticating..." : "🔐 Sign in with Google"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      <button onClick={getYouTubeUrl} disabled={loading || !userInfo?.authenticated}>
         Detect YouTube URL
       </button>
 
@@ -88,7 +263,7 @@ function Popup() {
 
       <button 
         onClick={extractAudio} 
-        disabled={loading || !videoUrl}
+        disabled={loading || !videoUrl || !userInfo?.authenticated}
         className="extract-button"
       >
         {loading ? "Extracting..." : "Extract Audio"}
@@ -96,7 +271,7 @@ function Popup() {
 
       {success && !loading && (
         <div className="success-message">
-          ✅ Audio extracted successfully! Ready to download.
+          ✅ Audio extracted and uploaded to Google Drive!
         </div>
       )}
 
@@ -108,10 +283,10 @@ function Popup() {
 
       {downloadUrl && !loading && (
         <div className="download-section">
-          <a href={downloadUrl} target="_blank" download>
-            <button className="download-button">📥 Download Audio</button>
+          <a href={downloadUrl} target="_blank" rel="noopener noreferrer">
+            <button className="download-button">📥 Open in Google Drive</button>
           </a>
-          <p className="download-hint">Click to download the MP3 file</p>
+          <p className="download-hint">File uploaded as: {userInfo?.email}</p>
         </div>
       )}
     </div>

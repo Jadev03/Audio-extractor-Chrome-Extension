@@ -66,7 +66,8 @@ import cors from "cors";
 import { createRequire } from "module";
 import { execSync, spawnSync } from "child_process";
 import logger, { auditLog } from "./logger.js";
-import { uploadToDrive, getAuthUrl, getTokenFromCode, isDriveConfigured } from "./driveService.js";
+import { uploadToDrive, uploadToDriveWithUserToken, getAuthUrl, getTokenFromCode, isDriveConfigured } from "./driveService.js";
+import { saveUserToken, loadUserToken, hasUserToken, getUserEmail } from "./userTokenService.js";
 
 // Import yt-dlp-wrap as CommonJS module using createRequire
 const require = createRequire(import.meta.url);
@@ -200,12 +201,14 @@ if (!fs.existsSync(downloadsDir)) {
 }
 
 app.post("/extract", async (req: Request, res: Response) => {
-  const { youtubeUrl } = req.body;
+  const { youtubeUrl, userId, userEmail } = req.body;
   const requestId = `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
   logger.info("Audio extraction request received", {
     requestId,
     youtubeUrl: youtubeUrl || "missing",
+    userId: userId || "missing",
+    userEmail: userEmail || "missing",
     ip: req.ip || req.socket.remoteAddress
   });
 
@@ -412,17 +415,33 @@ app.post("/extract", async (req: Request, res: Response) => {
       duration: `${duration}ms`
     });
 
-    // Upload to Google Drive if configured
+    // Upload to Google Drive if user is authenticated
     let driveFileInfo = null;
-    if (isDriveConfigured()) {
+    if (userId && hasUserToken(userId)) {
       try {
-        logger.info("Uploading to Google Drive", { requestId, fileName });
-        driveFileInfo = await uploadToDrive(outputPath, fileName);
+        const userToken = loadUserToken(userId);
+        if (!userToken || !userToken.accessToken) {
+          throw new Error("User token not found or invalid");
+        }
+
+        logger.info("Uploading to Google Drive with user token", { 
+          requestId, 
+          fileName,
+          userId,
+          userEmail: userToken.email
+        });
+        
+        driveFileInfo = await uploadToDriveWithUserToken(
+          outputPath, 
+          fileName,
+          userToken.accessToken
+        );
         
         logger.info("File uploaded to Google Drive successfully", {
           requestId,
           fileId: driveFileInfo.fileId,
-          webViewLink: driveFileInfo.webViewLink
+          webViewLink: driveFileInfo.webViewLink,
+          uploadedBy: userToken.email
         });
 
         // Optionally delete local file after successful upload
@@ -431,9 +450,27 @@ app.post("/extract", async (req: Request, res: Response) => {
       } catch (driveError) {
         logger.error("Failed to upload to Google Drive, keeping local file", {
           requestId,
+          userId,
           error: driveError instanceof Error ? driveError.message : String(driveError)
         });
         // Continue with local file URL if Drive upload fails
+      }
+    } else if (isDriveConfigured()) {
+      // Fallback to shared token if no user token
+      try {
+        logger.info("Uploading to Google Drive with shared token", { requestId, fileName });
+        driveFileInfo = await uploadToDrive(outputPath, fileName);
+        
+        logger.info("File uploaded to Google Drive successfully", {
+          requestId,
+          fileId: driveFileInfo.fileId,
+          webViewLink: driveFileInfo.webViewLink
+        });
+      } catch (driveError) {
+        logger.error("Failed to upload to Google Drive, keeping local file", {
+          requestId,
+          error: driveError instanceof Error ? driveError.message : String(driveError)
+        });
       }
     }
 
@@ -495,7 +532,52 @@ app.post("/extract", async (req: Request, res: Response) => {
   }
 });
 
-// Google Drive OAuth endpoints
+// User authentication endpoint
+app.post("/auth/user", async (req: Request, res: Response) => {
+  const { userId, email, accessToken } = req.body;
+
+  if (!userId || !email || !accessToken) {
+    return res.status(400).json({
+      success: false,
+      error: "userId, email, and accessToken are required"
+    });
+  }
+
+  try {
+    saveUserToken(userId, email, accessToken);
+    logger.info("User token saved", { userId, email });
+    
+    res.json({
+      success: true,
+      message: "User authentication saved successfully"
+    });
+  } catch (error) {
+    logger.error("Error saving user token", {
+      error: error instanceof Error ? error.message : String(error),
+      userId
+    });
+    
+    res.status(500).json({
+      success: false,
+      error: "Failed to save user authentication"
+    });
+  }
+});
+
+// Check user authentication status
+app.get("/auth/user/:userId", (req: Request, res: Response) => {
+  const { userId } = req.params;
+  
+  const hasToken = hasUserToken(userId);
+  const email = getUserEmail(userId);
+  
+  res.json({
+    authenticated: hasToken,
+    email: email || null
+  });
+});
+
+// Google Drive OAuth endpoints (for backward compatibility)
 app.get("/auth/google", (req: Request, res: Response) => {
   try {
     const authUrl = getAuthUrl();
@@ -530,6 +612,34 @@ app.get("/oauth2callback", async (req: Request, res: Response) => {
     logger.info("Exchanging authorization code for token", { code: code.substring(0, 10) + "..." });
     const tokenData = await getTokenFromCode(code);
     
+    // Get user info from Google using the access token
+    let userEmail = "Unknown";
+    let userId = "unknown";
+    
+    if (tokenData.access_token) {
+      try {
+        const userInfoResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+          headers: {
+            Authorization: `Bearer ${tokenData.access_token}`
+          }
+        });
+        
+        if (userInfoResponse.ok) {
+          const userData = await userInfoResponse.json();
+          userEmail = userData.email || "Unknown";
+          userId = userData.id || "unknown";
+          
+          // Save user token
+          saveUserToken(userId, userEmail, tokenData.access_token, tokenData.refresh_token);
+          logger.info("User token saved from OAuth callback", { userId, email: userEmail });
+        }
+      } catch (userInfoError) {
+        logger.warn("Failed to get user info, but token saved", {
+          error: userInfoError instanceof Error ? userInfoError.message : String(userInfoError)
+        });
+      }
+    }
+    
     // Verify token was saved
     const tokenPath = path.join(__dirname, "token.json");
     const tokenSaved = fs.existsSync(tokenPath);
@@ -537,18 +647,36 @@ app.get("/oauth2callback", async (req: Request, res: Response) => {
     logger.info("OAuth token saved successfully", {
       hasRefreshToken: !!tokenData.refresh_token,
       hasAccessToken: !!tokenData.access_token,
-      tokenFileExists: tokenSaved
+      tokenFileExists: tokenSaved,
+      userId,
+      userEmail
     });
     
+    // Return success page with user info and JavaScript to notify extension
     res.send(`
       <html>
+        <head>
+          <title>Authorization Successful</title>
+          <script>
+            // Store user info in localStorage for extension to read
+            localStorage.setItem('oauth_userId', '${userId}');
+            localStorage.setItem('oauth_userEmail', '${userEmail}');
+            localStorage.setItem('oauth_complete', 'true');
+            
+            // Try to close the window after a short delay
+            setTimeout(() => {
+              window.close();
+            }, 2000);
+          </script>
+        </head>
         <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
           <h1 style="color: #34a853;">✅ Authorization Successful!</h1>
+          <p>Logged in as: <strong>${userEmail}</strong></p>
           <p>Google Drive access has been configured.</p>
-          <p>You can close this window and return to the extension.</p>
-          <p style="margin-top: 30px; color: #666;">Token saved. Audio files will now be uploaded to Google Drive.</p>
+          <p style="margin-top: 20px;">You can close this window and return to the extension.</p>
+          <p style="margin-top: 30px; color: #666;">Token saved. Audio files will now be uploaded to Google Drive with your account.</p>
           <p style="margin-top: 20px; font-size: 12px; color: #999;">
-            Token file: ${tokenSaved ? "✅ Found" : "❌ Not found"} at ${tokenPath}
+            This window will close automatically...
           </p>
         </body>
       </html>

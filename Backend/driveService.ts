@@ -248,6 +248,88 @@ export async function getTokenFromCode(code: string): Promise<TokenData> {
 }
 
 /**
+ * Upload a file to Google Drive using a specific user's access token
+ * @param filePath Local path to the file
+ * @param fileName Name for the file in Drive
+ * @param userAccessToken User's Google access token
+ * @returns Promise with file ID and web view link
+ */
+export async function uploadToDriveWithUserToken(
+  filePath: string,
+  fileName: string,
+  userAccessToken: string
+): Promise<{ fileId: string; webViewLink: string; webContentLink: string }> {
+  if (!CLIENT_ID || !CLIENT_SECRET) {
+    throw new Error("Google Drive credentials not configured");
+  }
+
+  try {
+    const oauth2Client = getOAuth2Client();
+    oauth2Client.setCredentials({
+      access_token: userAccessToken
+    });
+
+    const drive = google.drive({ version: "v3", auth: oauth2Client });
+
+    // Check if file exists locally
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    const fileMetadata: any = {
+      name: fileName,
+    };
+
+    // Add folder ID if specified
+    if (DRIVE_FOLDER_ID) {
+      fileMetadata.parents = [DRIVE_FOLDER_ID];
+    }
+
+    const media = {
+      mimeType: "audio/mpeg",
+      body: fs.createReadStream(filePath),
+    };
+
+    logger.info("Uploading file to Google Drive with user token", {
+      fileName,
+      filePath,
+      folderId: DRIVE_FOLDER_ID || "root"
+    });
+
+    const response = await drive.files.create({
+      requestBody: fileMetadata,
+      media: media,
+      fields: "id, name, webViewLink, webContentLink",
+    });
+
+    if (!response.data.id) {
+      throw new Error("Failed to upload file - no file ID returned");
+    }
+
+    logger.info("File uploaded successfully to Google Drive", {
+      fileId: response.data.id,
+      fileName: response.data.name,
+      webViewLink: response.data.webViewLink
+    });
+
+    return {
+      fileId: response.data.id!,
+      webViewLink: response.data.webViewLink || "",
+      webContentLink: response.data.webContentLink || ""
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.error("Error uploading to Google Drive with user token", {
+      error: errorMessage,
+      fileName,
+      filePath,
+      stack: error instanceof Error ? error.stack : undefined
+    });
+    throw error;
+  }
+}
+
+/**
  * Upload a file to Google Drive
  * @param filePath Local path to the file
  * @param fileName Name for the file in Drive
