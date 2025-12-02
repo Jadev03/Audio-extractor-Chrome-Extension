@@ -31,7 +31,7 @@ function Popup() {
     setSuccess(false);
 
     try {
-      const res = await fetch("http://localhost:5000/extract", {
+      const res = await fetch("http://13.200.189.31:5000/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ youtubeUrl: videoUrl })

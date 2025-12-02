@@ -1,10 +1,10 @@
-version: '3.8'
-
 services:
   backend:
     build:
       context: .
       dockerfile: Dockerfile
+      # To use fast Dockerfile (no TypeScript build), uncomment:
+      # dockerfile: Dockerfile.fast
     container_name: audio-extractor-backend
     ports:
       - "0.0.0.0:5000:5000"  # Bind to all network interfaces for remote access

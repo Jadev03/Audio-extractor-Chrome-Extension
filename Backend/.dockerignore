@@ -1,8 +1,9 @@
 node_modules
-dist
+# dist  # Commented out - needed for fast Dockerfile build
 *.log
 logs/
 .env
+.env.prod
 downloads/
 token.json
 tokens/
@@ -17,5 +18,7 @@ tokens/
 .DS_Store
 coverage
 .nyc_output
+*.pem
+*.key
 
 
