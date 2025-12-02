@@ -200,6 +200,52 @@ if (!fs.existsSync(downloadsDir)) {
   fs.mkdirSync(downloadsDir, { recursive: true });
 }
 
+/**
+ * Clean YouTube URL by extracting video ID and removing playlist parameters
+ * Handles various YouTube URL formats:
+ * - https://www.youtube.com/watch?v=VIDEO_ID
+ * - https://www.youtube.com/watch?v=VIDEO_ID&list=...
+ * - https://youtu.be/VIDEO_ID
+ * - https://youtu.be/VIDEO_ID?list=...
+ */
+function cleanYouTubeUrl(url: string): string {
+  try {
+    const urlObj = new URL(url);
+    
+    // Extract video ID from different URL formats
+    let videoId: string | null = null;
+    
+    // Standard watch URL: ?v=VIDEO_ID
+    if (urlObj.hostname.includes('youtube.com') && urlObj.pathname === '/watch') {
+      videoId = urlObj.searchParams.get('v');
+    }
+    // Short URL: youtu.be/VIDEO_ID
+    else if (urlObj.hostname.includes('youtu.be')) {
+      videoId = urlObj.pathname.substring(1); // Remove leading /
+    }
+    // Embed URL: /embed/VIDEO_ID
+    else if (urlObj.pathname.startsWith('/embed/')) {
+      videoId = urlObj.pathname.substring(7); // Remove /embed/
+    }
+    
+    if (!videoId) {
+      logger.warn("Could not extract video ID from URL", { url });
+      return url; // Return original if we can't parse it
+    }
+    
+    // Reconstruct clean URL with just the video ID
+    const cleanUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    logger.info("Cleaned YouTube URL", { original: url, cleaned: cleanUrl, videoId });
+    return cleanUrl;
+  } catch (error) {
+    logger.warn("Error cleaning YouTube URL, using original", {
+      url,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return url; // Return original if parsing fails
+  }
+}
+
 app.post("/extract", async (req: Request, res: Response) => {
   const { youtubeUrl, userId, userEmail } = req.body;
   const requestId = `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -230,13 +276,17 @@ app.post("/extract", async (req: Request, res: Response) => {
     });
   }
 
+  // Clean the YouTube URL to remove playlist parameters and other query params
+  const cleanedUrl = cleanYouTubeUrl(youtubeUrl);
+  
   const outputPath = path.join(downloadsDir, `audio-${Date.now()}.mp3`);
   const startTime = Date.now();
 
   try {
     logger.info("Starting audio extraction", {
       requestId,
-      youtubeUrl,
+      originalUrl: youtubeUrl,
+      cleanedUrl,
       outputPath
     });
 
@@ -247,7 +297,7 @@ app.post("/extract", async (req: Request, res: Response) => {
       const pythonCmd = process.platform === "win32" ? "python" : "python3";
       const args: string[] = [
         "-m", "yt_dlp",
-        youtubeUrl,
+        cleanedUrl, // Use cleaned URL without playlist parameters
         "--no-playlist", // Only download single video, not entire playlist
         "--extract-audio", // Extract audio only
         "--audio-format", "mp3", // Convert to MP3
@@ -314,7 +364,7 @@ app.post("/extract", async (req: Request, res: Response) => {
       logger.info("yt-dlp execution completed successfully", { requestId });
     } else {
       const ytDlpArgs = [
-        youtubeUrl,
+        cleanedUrl, // Use cleaned URL without playlist parameters
         "--no-playlist", // Only download single video, not entire playlist
         "--extract-audio", // Extract audio only
         "--audio-format", "mp3", // Convert to MP3
