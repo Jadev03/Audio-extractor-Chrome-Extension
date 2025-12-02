@@ -302,10 +302,11 @@ app.post("/extract", async (req: Request, res: Response) => {
         "--extract-audio", // Extract audio only
         "--audio-format", "mp3", // Convert to MP3
         "--audio-quality", "0", // Best quality
-        "--format", "bestaudio/best", // Prefer best audio format
+        "--format", "bestaudio[ext=m4a]/bestaudio/best[height<=720]/best", // Better format selection with fallbacks
         "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
         "--output", outputPath,
-        "--verbose" // Add verbose logging to see what's happening
+        "--verbose", // Keep verbose for debugging
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" // Better user agent
       ];
       
       // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
@@ -327,16 +328,19 @@ app.post("/extract", async (req: Request, res: Response) => {
       });
       
       // Log output for debugging
-      if (result.stdout) {
+      const stdout = result.stdout?.toString() || "";
+      const stderr = result.stderr?.toString() || "";
+      
+      if (stdout) {
         logger.info("yt-dlp stdout", {
           requestId,
-          output: result.stdout.substring(0, 1000) // First 1000 chars
+          output: stdout.substring(0, 2000) // Increased to 2000 chars
         });
       }
-      if (result.stderr) {
+      if (stderr) {
         logger.warn("yt-dlp stderr", {
           requestId,
-          error: result.stderr.substring(0, 1000) // First 1000 chars
+          error: stderr.substring(0, 2000) // Increased to 2000 chars
         });
       }
       
@@ -350,15 +354,67 @@ app.post("/extract", async (req: Request, res: Response) => {
       }
       
       if (result.status !== 0) {
-        const errorOutput = result.stderr?.toString() || result.stdout?.toString() || "Unknown error";
+        // Parse the actual error message from yt-dlp output
+        // yt-dlp errors usually appear after debug info, look for ERROR, WARNING, or exception messages
+        let errorMessage = "Unknown error";
+        const fullOutput = stderr + "\n" + stdout;
+        
+        // Try to extract the actual error (usually after [youtube] or ERROR:)
+        const errorMatch = fullOutput.match(/(?:ERROR|WARNING|Error|Exception|Traceback)[:\s]+(.+?)(?:\n|$)/i);
+        if (errorMatch) {
+          errorMessage = errorMatch[1].trim();
+        } else {
+          // Look for common error patterns
+          const patterns = [
+            /Unable to download(.+?)(?:\n|$)/i,
+            /Video unavailable(.+?)(?:\n|$)/i,
+            /Private video(.+?)(?:\n|$)/i,
+            /Age-restricted(.+?)(?:\n|$)/i,
+            /Region blocked(.+?)(?:\n|$)/i,
+            /Sign in to confirm your age(.+?)(?:\n|$)/i
+          ];
+          
+          for (const pattern of patterns) {
+            const match = fullOutput.match(pattern);
+            if (match) {
+              errorMessage = match[0].trim();
+              break;
+            }
+          }
+          
+          // If no pattern matches, use the last non-debug line
+          const lines = fullOutput.split('\n').filter(line => 
+            line.trim() && 
+            !line.includes('[debug]') && 
+            !line.includes('Command-line config') &&
+            !line.includes('Encodings:') &&
+            !line.includes('yt-dlp version') &&
+            !line.includes('Python') &&
+            !line.includes('exe versions:') &&
+            !line.includes('Optional libraries:') &&
+            !line.includes('JS runtimes:') &&
+            !line.includes('Proxy map:') &&
+            !line.includes('Request Handlers:') &&
+            !line.includes('Plugin directories:') &&
+            !line.includes('Loaded') &&
+            !line.includes('Token Providers:') &&
+            !line.includes('Token Cache Providers:')
+          );
+          
+          if (lines.length > 0) {
+            errorMessage = lines[lines.length - 1].trim();
+          }
+        }
+        
         logger.error("yt-dlp execution failed", {
           requestId,
           exitCode: result.status,
-          error: errorOutput.substring(0, 1000), // More error details
-          stdout: result.stdout?.toString().substring(0, 500),
-          stderr: result.stderr?.toString().substring(0, 500)
+          parsedError: errorMessage,
+          fullStderr: stderr.substring(0, 3000), // Full stderr for debugging
+          fullStdout: stdout.substring(0, 3000)  // Full stdout for debugging
         });
-        throw new Error(`yt-dlp process exited with code ${result.status}: ${errorOutput.substring(0, 300)}`);
+        
+        throw new Error(`yt-dlp failed: ${errorMessage}`);
       }
       
       logger.info("yt-dlp execution completed successfully", { requestId });
@@ -369,9 +425,10 @@ app.post("/extract", async (req: Request, res: Response) => {
         "--extract-audio", // Extract audio only
         "--audio-format", "mp3", // Convert to MP3
         "--audio-quality", "0", // Best quality
-        "--format", "bestaudio/best", // Prefer best audio format
+        "--format", "bestaudio[ext=m4a]/bestaudio/best[height<=720]/best", // Better format selection with fallbacks
         "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
-        "--output", outputPath
+        "--output", outputPath,
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" // Better user agent
       ];
       
       // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
