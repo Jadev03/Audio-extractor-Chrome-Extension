@@ -84,7 +84,7 @@ jobs:
           port: 22
           source: "Backend/dist.tar.gz"
           target: "/home/ubuntu/Audio-extractor-Chrome-Extension/Backend/"
-          strip_components: 0
+          strip_components: 1
           debug: true
           overwrite: true
           rm: false
@@ -103,8 +103,10 @@ jobs:
             pwd
             echo "📁 Directory contents:"
             ls -la | head -20
+            
+            # Check both possible locations
             if [ -f dist.tar.gz ]; then
-              echo "✅ dist.tar.gz found on EC2:"
+              echo "✅ dist.tar.gz found in current directory:"
               ls -lh dist.tar.gz
               echo "🔍 Verifying file integrity..."
               if [ -s dist.tar.gz ]; then
@@ -113,10 +115,25 @@ jobs:
                 echo "❌ ERROR: File is empty!"
                 exit 1
               fi
+            elif [ -f Backend/dist.tar.gz ]; then
+              echo "✅ dist.tar.gz found in Backend/ subdirectory (will be moved during deployment):"
+              ls -lh Backend/dist.tar.gz
+              echo "🔍 Verifying file integrity..."
+              if [ -s Backend/dist.tar.gz ]; then
+                echo "✅ File is not empty, size check passed"
+                echo "ℹ️ Note: File will be moved to current directory during deployment"
+              else
+                echo "❌ ERROR: File is empty!"
+                exit 1
+              fi
             else
               echo "❌ ERROR: dist.tar.gz not found on EC2 after upload!"
               echo "📁 Full directory contents:"
               ls -la
+              if [ -d Backend ]; then
+                echo "📁 Backend subdirectory contents:"
+                ls -la Backend/ | head -10
+              fi
               echo "🔍 Searching for dist.tar.gz..."
               find /home/ubuntu -name "dist.tar.gz" -type f 2>/dev/null | head -10
               exit 1
@@ -141,11 +158,16 @@ jobs:
             # (git clean might remove it if we do git operations first)
             echo "📦 Looking for dist.tar.gz..."
             
-            # Check multiple possible locations
+            # Check multiple possible locations (SCP might extract to Backend/Backend/)
             DIST_TAR=""
             if [ -f dist.tar.gz ]; then
               DIST_TAR="dist.tar.gz"
               echo "✅ Found dist.tar.gz in current directory"
+            elif [ -f Backend/dist.tar.gz ]; then
+              echo "✅ Found dist.tar.gz in Backend/ subdirectory, moving to current directory..."
+              mv Backend/dist.tar.gz dist.tar.gz
+              DIST_TAR="dist.tar.gz"
+              echo "✅ File moved successfully"
             elif [ -f ./dist.tar.gz ]; then
               DIST_TAR="./dist.tar.gz"
               echo "✅ Found dist.tar.gz with ./ prefix"
@@ -153,7 +175,11 @@ jobs:
               echo "❌ ERROR: dist.tar.gz not found in expected location!"
               echo "📁 Current directory contents:"
               ls -la
-              echo "🔍 Searching for dist.tar.gz in parent directories..."
+              if [ -d Backend ]; then
+                echo "📁 Backend subdirectory contents:"
+                ls -la Backend/ | head -10
+              fi
+              echo "🔍 Searching for dist.tar.gz..."
               find /home/ubuntu -name "dist.tar.gz" -type f 2>/dev/null | head -5 || echo "No dist.tar.gz found anywhere"
               exit 1
             fi
