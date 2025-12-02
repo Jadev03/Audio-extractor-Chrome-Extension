@@ -306,7 +306,8 @@ app.post("/extract", async (req: Request, res: Response) => {
         "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
         "--output", outputPath,
         "--verbose", // Keep verbose for debugging
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" // Better user agent
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", // Better user agent
+        "--extractor-args", "youtube:player_client=ios" // Use iOS client to avoid bot detection (works better than android/web)
       ];
       
       // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
@@ -360,18 +361,21 @@ app.post("/extract", async (req: Request, res: Response) => {
         const fullOutput = stderr + "\n" + stdout;
         
         // Try to extract the actual error (usually after [youtube] or ERROR:)
-        const errorMatch = fullOutput.match(/(?:ERROR|WARNING|Error|Exception|Traceback)[:\s]+(.+?)(?:\n|$)/i);
+        // Look for ERROR: lines first (most specific)
+        const errorMatch = fullOutput.match(/ERROR:\s*\[youtube\]\s*.+?:\s*(.+?)(?:\n|$)/i);
         if (errorMatch) {
           errorMessage = errorMatch[1].trim();
         } else {
-          // Look for common error patterns
+          // Look for common error patterns (order matters - most specific first)
           const patterns = [
-            /Unable to download(.+?)(?:\n|$)/i,
+            /Sign in to confirm you['']re not a bot(.+?)(?:\n|$)/i,
+            /Sign in to confirm your age(.+?)(?:\n|$)/i,
             /Video unavailable(.+?)(?:\n|$)/i,
             /Private video(.+?)(?:\n|$)/i,
             /Age-restricted(.+?)(?:\n|$)/i,
             /Region blocked(.+?)(?:\n|$)/i,
-            /Sign in to confirm your age(.+?)(?:\n|$)/i
+            /Unable to download(.+?)(?:\n|$)/i,
+            /LOGIN_REQUIRED/i
           ];
           
           for (const pattern of patterns) {
@@ -406,15 +410,30 @@ app.post("/extract", async (req: Request, res: Response) => {
           }
         }
         
+        // Make error message more user-friendly
+        let userFriendlyError = errorMessage;
+        if (errorMessage.toLowerCase().includes("sign in to confirm") || errorMessage.toLowerCase().includes("not a bot")) {
+          userFriendlyError = "YouTube is blocking the request. This video may require authentication or is temporarily unavailable. Please try again later or try a different video.";
+        } else if (errorMessage.toLowerCase().includes("login_required")) {
+          userFriendlyError = "This video requires login to access. Please try a different video that is publicly available.";
+        } else if (errorMessage.toLowerCase().includes("private video")) {
+          userFriendlyError = "This video is private and cannot be accessed.";
+        } else if (errorMessage.toLowerCase().includes("age-restricted")) {
+          userFriendlyError = "This video is age-restricted and cannot be downloaded without authentication.";
+        } else if (errorMessage.toLowerCase().includes("region blocked") || errorMessage.toLowerCase().includes("not available")) {
+          userFriendlyError = "This video is not available in your region or has been removed.";
+        }
+        
         logger.error("yt-dlp execution failed", {
           requestId,
           exitCode: result.status,
           parsedError: errorMessage,
+          userFriendlyError,
           fullStderr: stderr.substring(0, 3000), // Full stderr for debugging
           fullStdout: stdout.substring(0, 3000)  // Full stdout for debugging
         });
         
-        throw new Error(`yt-dlp failed: ${errorMessage}`);
+        throw new Error(userFriendlyError);
       }
       
       logger.info("yt-dlp execution completed successfully", { requestId });
