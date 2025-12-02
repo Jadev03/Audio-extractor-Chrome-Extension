@@ -36,14 +36,6 @@ jobs:
           echo "✅ Build complete!"
           echo "📁 Contents of dist folder:"
           ls -la dist/
-          echo "🔍 Verifying /auth/latest endpoint in built code..."
-          if grep -q "auth/latest" dist/server.js; then
-            echo "✅ /auth/latest endpoint found in dist/server.js"
-            grep -n "auth/latest" dist/server.js | head -1
-          else
-            echo "❌ ERROR: /auth/latest endpoint NOT found in dist/server.js!"
-            exit 1
-          fi
       
       - name: Create deployment package
         working-directory: Backend
@@ -75,16 +67,18 @@ jobs:
             # Navigate to backend directory
             cd /home/ubuntu/Audio-extractor-Chrome-Extension/Backend || { echo "❌ Backend directory not found!"; exit 1; }
             
-            echo "📥 Pulling latest code from production branch..."
-            git fetch origin
-            git checkout production
-            git pull origin production
+            # IMPORTANT: Extract dist.tar.gz FIRST before any git operations
+            # (git clean might remove it if we do git operations first)
+            echo "📦 Extracting dist folder (BEFORE git operations)..."
+            echo "📁 Checking for dist.tar.gz in current directory:"
+            pwd
+            ls -la dist.tar.gz 2>/dev/null || echo "⚠️ dist.tar.gz not found yet"
             
-            echo "📦 Extracting dist folder..."
             if [ -f dist.tar.gz ]; then
+              echo "✅ Found dist.tar.gz, extracting..."
               rm -rf dist/  # Remove old dist if exists
               tar -xzf dist.tar.gz
-              rm dist.tar.gz  # Clean up
+              # Keep dist.tar.gz for now (don't delete yet)
               echo "✅ Dist folder extracted:"
               ls -la dist/
               echo "🔍 Verifying /auth/latest endpoint after extraction..."
@@ -95,9 +89,25 @@ jobs:
                 exit 1
               fi
             else
-              echo "⚠️ dist.tar.gz not found, skipping extraction"
+              echo "❌ ERROR: dist.tar.gz not found! Deployment cannot continue."
+              echo "📁 Current directory contents:"
+              ls -la
               exit 1
             fi
+            
+            echo "📥 Pulling latest code from production branch..."
+            git fetch origin
+            git checkout production
+            # Handle untracked files that might conflict (but preserve dist.tar.gz and dist/)
+            git clean -fd --exclude=dist.tar.gz --exclude=dist/ || true
+            git pull origin production || {
+              echo "⚠️ Git pull had conflicts, stashing local changes..."
+              git stash || true
+              git pull origin production || true
+            }
+            
+            # Clean up dist.tar.gz after git operations
+            rm -f dist.tar.gz
             
             echo "🔧 Setting up Dockerfile..."
             if [ -f Dockerfile.fast ]; then
