@@ -577,6 +577,50 @@ app.get("/auth/user/:userId", (req: Request, res: Response) => {
   });
 });
 
+// Get latest authenticated user (for OAuth callback)
+app.get("/auth/latest", (req: Request, res: Response) => {
+  try {
+    const tokensDir = path.join(__dirname, "..", "user-tokens");
+    if (!fs.existsSync(tokensDir)) {
+      return res.json({ userId: null, email: null });
+    }
+    
+    // Get all token files, sorted by modification time (newest first)
+    const files = fs.readdirSync(tokensDir)
+      .filter(f => f.endsWith('.json'))
+      .map(f => ({
+        name: f,
+        path: path.join(tokensDir, f),
+        mtime: fs.statSync(path.join(tokensDir, f)).mtime.getTime()
+      }))
+      .sort((a, b) => b.mtime - a.mtime); // Newest first
+    
+    if (files.length === 0) {
+      return res.json({ userId: null, email: null });
+    }
+    
+    // Get the most recently modified token file
+    const latestFile = files[0];
+    const tokenData = JSON.parse(fs.readFileSync(latestFile.path, "utf8"));
+    
+    // Only return if modified in last 5 minutes (recently authenticated)
+    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+    if (latestFile.mtime > fiveMinutesAgo) {
+      res.json({
+        userId: tokenData.userId || null,
+        email: tokenData.email || null
+      });
+    } else {
+      res.json({ userId: null, email: null });
+    }
+  } catch (error) {
+    logger.error("Error getting latest authenticated user", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    res.json({ userId: null, email: null });
+  }
+});
+
 // Google Drive OAuth endpoints (for backward compatibility)
 app.get("/auth/google", (req: Request, res: Response) => {
   try {

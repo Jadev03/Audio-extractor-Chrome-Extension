@@ -103,16 +103,40 @@ function Popup() {
       });
 
       // Listen for tab updates to detect when OAuth completes
-      const tabUpdateListener = (tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+      const tabUpdateListener = (tabId: number, changeInfo: { url?: string; status?: string }) => {
         if (tabId === authTab.id && changeInfo.url?.includes("oauth2callback")) {
           // OAuth callback happened
           chrome.tabs.onUpdated.removeListener(tabUpdateListener);
           
-          // Wait a bit for the callback page to set localStorage
+          // Wait for backend to process OAuth and get user info
           setTimeout(async () => {
-            // Check if user info was stored
-            const oauthComplete = localStorage.getItem("oauth_complete");
-            if (oauthComplete === "true") {
+            try {
+              // Get latest authenticated user from backend
+              await checkAuthStatusAfterOAuth();
+              setAuthLoading(false);
+            } catch (err) {
+              // Fallback: check backend directly
+              await checkAuthStatusAfterOAuth();
+              setAuthLoading(false);
+            }
+          }, 3000);
+        }
+      };
+
+      chrome.tabs.onUpdated.addListener(tabUpdateListener);
+      
+      // Helper function to check auth status after OAuth
+      const checkAuthStatusAfterOAuth = async () => {
+        try {
+          // Get latest authenticated user from backend
+          const latestResponse = await fetch(`${BACKEND_URL}/auth/latest`);
+          if (latestResponse.ok) {
+            const latest = await latestResponse.json();
+            if (latest.userId && latest.email) {
+              // Store user info
+              localStorage.setItem("userId", latest.userId);
+              localStorage.setItem("userEmail", latest.email);
+              
               // Refresh auth status
               await checkAuthStatus();
               
@@ -124,16 +148,26 @@ function Popup() {
                 type: "basic",
                 iconUrl: chrome.runtime.getURL("/vite.svg"),
                 title: "✅ Authentication Successful!",
-                message: "You can now extract audio files"
+                message: `Logged in as ${latest.email}`
               });
+              return;
             }
-            
-            setAuthLoading(false);
-          }, 2000);
+          }
+        } catch (err) {
+          console.error("Error getting latest user:", err);
         }
+        
+        // Fallback: just refresh
+        await checkAuthStatus();
+        chrome.tabs.remove(authTab.id!);
+        
+        chrome.notifications.create({
+          type: "basic",
+          iconUrl: chrome.runtime.getURL("/vite.svg"),
+          title: "✅ Authentication Complete!",
+          message: "Please close and reopen the extension popup"
+        });
       };
-
-      chrome.tabs.onUpdated.addListener(tabUpdateListener);
 
       // Also listen for tab removal (user closed it)
       const tabRemoveListener = (tabId: number) => {
