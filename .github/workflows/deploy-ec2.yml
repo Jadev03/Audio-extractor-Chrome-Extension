@@ -227,20 +227,123 @@ jobs:
               echo "⚠️ Dockerfile.fast not found, using existing Dockerfile"
             fi
             
+            echo "🔍 Verifying dist folder is ready..."
+            if [ ! -d dist ] || [ ! -f dist/server.js ]; then
+              echo "❌ ERROR: dist folder is missing or incomplete!"
+              echo "📁 Current directory contents:"
+              ls -la
+              exit 1
+            fi
+            
+            # Check dist folder modification time (should be recent)
+            DIST_AGE=$(find dist/server.js -mmin +60 2>/dev/null && echo "old" || echo "recent")
+            if [ "$DIST_AGE" = "old" ]; then
+              echo "⚠️ WARNING: dist/server.js is older than 60 minutes. This might be old code!"
+            else
+              echo "✅ dist/server.js is recent"
+            fi
+            
+            echo "💾 Checking disk space..."
+            df -h
+            # Get available space in MB (more reliable than GB parsing)
+            AVAILABLE_MB=$(df -m / | tail -1 | awk '{print $4}')
+            echo "Available space: ${AVAILABLE_MB}MB"
+            
+            # Check if we have less than 2000MB (2GB) free
+            if [ "$AVAILABLE_MB" -lt 2000 ]; then
+              echo "⚠️ Low disk space detected (< 2GB), cleaning up..."
+              
+              echo "🛑 Stopping existing containers..."
+              docker-compose -f docker-compose.prod.yml down || true
+              
+              echo "🧹 Aggressive Docker cleanup..."
+              docker system prune -af --volumes || true
+              docker builder prune -af || true
+              
+              # Remove unused images
+              docker image prune -af || true
+              
+              # Remove old dist folders if they exist
+              find . -name "node_modules" -type d -exec rm -rf {} + 2>/dev/null || true
+              
+              echo "💾 Disk space after cleanup:"
+              df -h
+            else
+              echo "✅ Sufficient disk space available"
+            fi
+            
             echo "🛑 Stopping existing containers..."
             docker-compose -f docker-compose.prod.yml down || true
+            
+            echo "🗑️ Removing old backend image to force rebuild..."
+            docker rmi backend-backend 2>/dev/null || echo "Image not found (will be built fresh)"
+            docker rmi $(docker images -q backend-backend) 2>/dev/null || true
             
             echo "🧹 Cleaning up Docker (free space)..."
             docker system prune -f || true
             
-            echo "🏗️ Building Docker image..."
-            docker-compose -f docker-compose.prod.yml build --no-cache
+            echo "🏗️ Building Docker image (this will use the new dist folder)..."
+            if ! docker-compose -f docker-compose.prod.yml build --no-cache; then
+              echo "❌ Docker build failed! Attempting cleanup and retry..."
+              
+              # More aggressive cleanup
+              docker system prune -af || true
+              docker builder prune -af || true
+              
+              # Check disk space again
+              echo "💾 Disk space after cleanup:"
+              df -h
+              
+              # Retry build
+              echo "🔄 Retrying Docker build..."
+              if ! docker-compose -f docker-compose.prod.yml build --no-cache; then
+                echo "❌ ERROR: Docker build failed after cleanup. Deployment cannot continue."
+                exit 1
+              fi
+            fi
+            
+            echo "✅ Docker build completed successfully"
             
             echo "🚀 Starting containers..."
             docker-compose -f docker-compose.prod.yml up -d
             
             echo "⏳ Waiting for container to be healthy..."
             sleep 10
+            
+            echo "🔍 Verifying deployed code matches build..."
+            # Check if the new code is in the container
+            if docker exec audio-extractor-backend test -f /app/dist/server.js; then
+              echo "✅ Container has server.js"
+              
+              # Verify the new endpoints exist
+              if docker exec audio-extractor-backend grep -q "auth/latest" /app/dist/server.js; then
+                echo "✅ /auth/latest endpoint found in container"
+              else
+                echo "⚠️ WARNING: /auth/latest endpoint NOT found in container!"
+              fi
+              
+              # Check if userinfo scopes are in the code
+              if docker exec audio-extractor-backend grep -q "userinfo.email" /app/dist/driveService.js 2>/dev/null; then
+                echo "✅ Userinfo scopes found in container"
+              else
+                echo "⚠️ WARNING: Userinfo scopes NOT found in container!"
+              fi
+              
+              # Get file modification time to verify it's recent
+              CONTAINER_FILE_TIME=$(docker exec audio-extractor-backend stat -c %Y /app/dist/server.js 2>/dev/null || echo "0")
+              LOCAL_FILE_TIME=$(stat -c %Y dist/server.js 2>/dev/null || echo "0")
+              
+              if [ "$CONTAINER_FILE_TIME" != "0" ] && [ "$LOCAL_FILE_TIME" != "0" ]; then
+                TIME_DIFF=$((CONTAINER_FILE_TIME - LOCAL_FILE_TIME))
+                if [ $TIME_DIFF -lt 300 ]; then
+                  echo "✅ Container file is recent (within 5 minutes of local file)"
+                else
+                  echo "⚠️ WARNING: Container file timestamp differs significantly from local file"
+                fi
+              fi
+            else
+              echo "❌ ERROR: Container does not have server.js file!"
+            fi
             
             echo "🧹 Cleaning up unused Docker images..."
             docker image prune -f || true
