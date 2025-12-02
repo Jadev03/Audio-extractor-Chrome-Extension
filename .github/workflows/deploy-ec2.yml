@@ -65,19 +65,30 @@ jobs:
           script: |
             echo "📁 Ensuring target directory exists..."
             mkdir -p /home/ubuntu/Audio-extractor-Chrome-Extension/Backend
-            echo "✅ Directory ready for upload"
+            echo "✅ Directory ready"
       
-      - name: Upload dist to EC2
+      - name: Verify file path for upload
+        run: |
+          echo "🔍 Verifying file exists at workspace root level..."
+          ls -lh Backend/dist.tar.gz || echo "File not found at Backend/dist.tar.gz"
+          pwd
+          echo "📁 Workspace contents:"
+          ls -la | head -10
+      
+      - name: Upload dist.tar.gz to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
           source: "Backend/dist.tar.gz"
           target: "/home/ubuntu/Audio-extractor-Chrome-Extension/Backend/"
           strip_components: 0
           debug: true
           overwrite: true
+          rm: false
+        continue-on-error: false
       
       - name: Verify upload on EC2
         uses: appleboy/ssh-action@v1.0.0
@@ -88,13 +99,26 @@ jobs:
           script: |
             echo "🔍 Verifying dist.tar.gz was uploaded successfully..."
             cd /home/ubuntu/Audio-extractor-Chrome-Extension/Backend || exit 1
+            echo "📁 Current directory:"
+            pwd
+            echo "📁 Directory contents:"
+            ls -la | head -20
             if [ -f dist.tar.gz ]; then
               echo "✅ dist.tar.gz found on EC2:"
               ls -lh dist.tar.gz
+              echo "🔍 Verifying file integrity..."
+              if [ -s dist.tar.gz ]; then
+                echo "✅ File is not empty, size check passed"
+              else
+                echo "❌ ERROR: File is empty!"
+                exit 1
+              fi
             else
               echo "❌ ERROR: dist.tar.gz not found on EC2 after upload!"
-              echo "📁 Current directory contents:"
+              echo "📁 Full directory contents:"
               ls -la
+              echo "🔍 Searching for dist.tar.gz..."
+              find /home/ubuntu -name "dist.tar.gz" -type f 2>/dev/null | head -10
               exit 1
             fi
       
