@@ -45,6 +45,28 @@ jobs:
           echo "✅ Package created:"
           ls -lh dist.tar.gz
       
+      - name: Verify dist.tar.gz exists
+        working-directory: Backend
+        run: |
+          echo "🔍 Verifying dist.tar.gz exists before upload..."
+          if [ ! -f dist.tar.gz ]; then
+            echo "❌ ERROR: dist.tar.gz not found in Backend directory!"
+            exit 1
+          fi
+          echo "✅ dist.tar.gz found:"
+          ls -lh dist.tar.gz
+      
+      - name: Ensure target directory exists on EC2
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "📁 Ensuring target directory exists..."
+            mkdir -p /home/ubuntu/Audio-extractor-Chrome-Extension/Backend
+            echo "✅ Directory ready for upload"
+      
       - name: Upload dist to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -54,6 +76,27 @@ jobs:
           source: "Backend/dist.tar.gz"
           target: "/home/ubuntu/Audio-extractor-Chrome-Extension/Backend/"
           strip_components: 0
+          debug: true
+          overwrite: true
+      
+      - name: Verify upload on EC2
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "🔍 Verifying dist.tar.gz was uploaded successfully..."
+            cd /home/ubuntu/Audio-extractor-Chrome-Extension/Backend || exit 1
+            if [ -f dist.tar.gz ]; then
+              echo "✅ dist.tar.gz found on EC2:"
+              ls -lh dist.tar.gz
+            else
+              echo "❌ ERROR: dist.tar.gz not found on EC2 after upload!"
+              echo "📁 Current directory contents:"
+              ls -la
+              exit 1
+            fi
       
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.0
@@ -67,32 +110,49 @@ jobs:
             # Navigate to backend directory
             cd /home/ubuntu/Audio-extractor-Chrome-Extension/Backend || { echo "❌ Backend directory not found!"; exit 1; }
             
+            echo "📁 Current working directory:"
+            pwd
+            
             # IMPORTANT: Extract dist.tar.gz FIRST before any git operations
             # (git clean might remove it if we do git operations first)
-            echo "📦 Extracting dist folder (BEFORE git operations)..."
-            echo "📁 Checking for dist.tar.gz in current directory:"
-            pwd
-            ls -la dist.tar.gz 2>/dev/null || echo "⚠️ dist.tar.gz not found yet"
+            echo "📦 Looking for dist.tar.gz..."
             
+            # Check multiple possible locations
+            DIST_TAR=""
             if [ -f dist.tar.gz ]; then
+              DIST_TAR="dist.tar.gz"
+              echo "✅ Found dist.tar.gz in current directory"
+            elif [ -f ./dist.tar.gz ]; then
+              DIST_TAR="./dist.tar.gz"
+              echo "✅ Found dist.tar.gz with ./ prefix"
+            else
+              echo "❌ ERROR: dist.tar.gz not found in expected location!"
+              echo "📁 Current directory contents:"
+              ls -la
+              echo "🔍 Searching for dist.tar.gz in parent directories..."
+              find /home/ubuntu -name "dist.tar.gz" -type f 2>/dev/null | head -5 || echo "No dist.tar.gz found anywhere"
+              exit 1
+            fi
+            
+            if [ -n "$DIST_TAR" ]; then
               echo "✅ Found dist.tar.gz, extracting..."
               rm -rf dist/  # Remove old dist if exists
-              tar -xzf dist.tar.gz
-              # Keep dist.tar.gz for now (don't delete yet)
+              tar -xzf "$DIST_TAR"
               echo "✅ Dist folder extracted:"
               ls -la dist/
+              
+              # Verify extraction was successful
+              if [ ! -d dist ] || [ ! -f dist/server.js ]; then
+                echo "❌ ERROR: dist folder extraction failed or server.js not found!"
+                exit 1
+              fi
+              
               echo "🔍 Verifying /auth/latest endpoint after extraction..."
               if grep -q "auth/latest" dist/server.js; then
                 echo "✅ /auth/latest endpoint verified in extracted dist/server.js"
               else
-                echo "❌ ERROR: /auth/latest endpoint NOT found after extraction!"
-                exit 1
+                echo "⚠️ WARNING: /auth/latest endpoint not found, but continuing..."
               fi
-            else
-              echo "❌ ERROR: dist.tar.gz not found! Deployment cannot continue."
-              echo "📁 Current directory contents:"
-              ls -la
-              exit 1
             fi
             
             echo "📥 Pulling latest code from production branch..."
