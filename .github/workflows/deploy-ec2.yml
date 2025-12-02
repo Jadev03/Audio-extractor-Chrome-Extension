@@ -1,0 +1,122 @@
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - production
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy Backend to EC2
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: Backend/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: Backend
+        run: |
+          echo "📦 Installing dependencies..."
+          npm ci
+      
+      - name: Build TypeScript
+        working-directory: Backend
+        run: |
+          echo "🏗️ Building TypeScript..."
+          npm run build
+          echo "✅ Build complete!"
+          echo "📁 Contents of dist folder:"
+          ls -la dist/
+      
+      - name: Create deployment package
+        working-directory: Backend
+        run: |
+          echo "📦 Creating deployment package..."
+          tar -czf dist.tar.gz dist/
+          echo "✅ Package created:"
+          ls -lh dist.tar.gz
+      
+      - name: Upload dist to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "Backend/dist.tar.gz"
+          target: "/home/ubuntu/Audio-extractor-Chrome-Extension/Backend/"
+          strip_components: 0
+      
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "🚀 Starting deployment..."
+            
+            # Navigate to backend directory
+            cd /home/ubuntu/Audio-extractor-Chrome-Extension/Backend || { echo "❌ Backend directory not found!"; exit 1; }
+            
+            echo "📥 Pulling latest code from production branch..."
+            git fetch origin
+            git checkout production
+            git pull origin production
+            
+            echo "📦 Extracting dist folder..."
+            if [ -f dist.tar.gz ]; then
+              rm -rf dist/  # Remove old dist if exists
+              tar -xzf dist.tar.gz
+              rm dist.tar.gz  # Clean up
+              echo "✅ Dist folder extracted:"
+              ls -la dist/
+            else
+              echo "⚠️ dist.tar.gz not found, skipping extraction"
+            fi
+            
+            echo "🔧 Setting up Dockerfile..."
+            if [ -f Dockerfile.fast ]; then
+              cp Dockerfile.fast Dockerfile
+              echo "✅ Using Dockerfile.fast"
+            else
+              echo "⚠️ Dockerfile.fast not found, using existing Dockerfile"
+            fi
+            
+            echo "🛑 Stopping existing containers..."
+            docker-compose -f docker-compose.prod.yml down || true
+            
+            echo "🧹 Cleaning up Docker (free space)..."
+            docker system prune -f || true
+            
+            echo "🏗️ Building Docker image..."
+            docker-compose -f docker-compose.prod.yml build
+            
+            echo "🚀 Starting containers..."
+            docker-compose -f docker-compose.prod.yml up -d
+            
+            echo "⏳ Waiting for container to be healthy..."
+            sleep 10
+            
+            echo "🧹 Cleaning up unused Docker images..."
+            docker image prune -f || true
+            
+            echo "📊 Container status:"
+            docker-compose -f docker-compose.prod.yml ps
+            
+            echo "📋 Recent logs:"
+            docker-compose -f docker-compose.prod.yml logs --tail=30
+            
+            echo "🏥 Health check..."
+            curl -f http://localhost:5000/drive/status || echo "⚠️ Health check failed, but deployment completed"
+            
+            echo "✅ Deployment complete!"
+
