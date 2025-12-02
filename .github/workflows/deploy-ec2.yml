@@ -36,6 +36,14 @@ jobs:
           echo "✅ Build complete!"
           echo "📁 Contents of dist folder:"
           ls -la dist/
+          echo "🔍 Verifying /auth/latest endpoint in built code..."
+          if grep -q "auth/latest" dist/server.js; then
+            echo "✅ /auth/latest endpoint found in dist/server.js"
+            grep -n "auth/latest" dist/server.js | head -1
+          else
+            echo "❌ ERROR: /auth/latest endpoint NOT found in dist/server.js!"
+            exit 1
+          fi
       
       - name: Create deployment package
         working-directory: Backend
@@ -79,8 +87,16 @@ jobs:
               rm dist.tar.gz  # Clean up
               echo "✅ Dist folder extracted:"
               ls -la dist/
+              echo "🔍 Verifying /auth/latest endpoint after extraction..."
+              if grep -q "auth/latest" dist/server.js; then
+                echo "✅ /auth/latest endpoint verified in extracted dist/server.js"
+              else
+                echo "❌ ERROR: /auth/latest endpoint NOT found after extraction!"
+                exit 1
+              fi
             else
               echo "⚠️ dist.tar.gz not found, skipping extraction"
+              exit 1
             fi
             
             echo "🔧 Setting up Dockerfile..."
