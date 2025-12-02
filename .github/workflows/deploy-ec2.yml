@@ -98,7 +98,7 @@ jobs:
             docker system prune -f || true
             
             echo "🏗️ Building Docker image..."
-            docker-compose -f docker-compose.prod.yml build
+            docker-compose -f docker-compose.prod.yml build --no-cache
             
             echo "🚀 Starting containers..."
             docker-compose -f docker-compose.prod.yml up -d
