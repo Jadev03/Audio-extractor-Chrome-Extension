@@ -29,6 +29,8 @@ services:
       - ./token.json:/app/dist/token.json
       # Persist logs
       - ./logs:/app/logs
+      # Mount cookies.txt for YouTube authentication (bypass bot detection)
+      - ./cookies.txt:/app/cookies.txt:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:5000/drive/status', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]

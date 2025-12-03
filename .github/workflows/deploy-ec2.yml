@@ -206,15 +206,38 @@ jobs:
             fi
             
             echo "📥 Pulling latest code from production branch..."
+            
+            # Preserve cookies.txt if it exists (it's in .gitignore, so won't be in git)
+            if [ -f cookies.txt ]; then
+              echo "🍪 Preserving existing cookies.txt file..."
+              cp cookies.txt cookies.txt.backup
+            fi
+            
             git fetch origin
             git checkout production
-            # Handle untracked files that might conflict (but preserve dist.tar.gz and dist/)
-            git clean -fd --exclude=dist.tar.gz --exclude=dist/ || true
+            # Handle untracked files that might conflict (but preserve dist.tar.gz, dist/, and cookies.txt)
+            git clean -fd --exclude=dist.tar.gz --exclude=dist/ --exclude=cookies.txt || true
             git pull origin production || {
               echo "⚠️ Git pull had conflicts, stashing local changes..."
               git stash || true
               git pull origin production || true
             }
+            
+            # Restore cookies.txt if it was backed up
+            if [ -f cookies.txt.backup ]; then
+              echo "🍪 Restoring cookies.txt file..."
+              mv cookies.txt.backup cookies.txt
+              chmod 644 cookies.txt
+            fi
+            
+            # Check if cookies.txt exists, if not create a note
+            if [ ! -f cookies.txt ]; then
+              echo "⚠️ cookies.txt not found. Container will work without cookies (may have bot detection issues)."
+              echo "💡 To add cookies: Export from browser and upload via SCP to this directory"
+            else
+              echo "✅ cookies.txt found and preserved"
+              ls -lh cookies.txt
+            fi
             
             # Clean up dist.tar.gz after git operations
             rm -f dist.tar.gz
@@ -320,6 +343,15 @@ jobs:
                 echo "✅ /auth/latest endpoint found in container"
               else
                 echo "⚠️ WARNING: /auth/latest endpoint NOT found in container!"
+              fi
+              
+              # Check if cookies.txt is mounted
+              if docker exec audio-extractor-backend test -f /app/cookies.txt; then
+                echo "✅ cookies.txt is mounted in container"
+                docker exec audio-extractor-backend ls -lh /app/cookies.txt
+              else
+                echo "⚠️ cookies.txt not found in container (will work without cookies, may have bot detection)"
+                echo "💡 To add cookies: Upload cookies.txt to Backend/ directory and restart container"
               fi
               
               # Check if userinfo scopes are in the code

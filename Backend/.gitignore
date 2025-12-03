@@ -8,6 +8,7 @@ downloads/
 token.json
 *.pem
 *.key
+cookies.txt
 
 #some readme file
 GOOGLE_DRIVE_SETUP.md
