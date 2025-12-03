@@ -1,0 +1,16 @@
+# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file! Do not edit.
+
+.youtube.com	TRUE	/	TRUE	1799305785	PREF	tz=Asia.Colombo&f4=4000000&f6=40000000&f7=100
+.youtube.com	TRUE	/	TRUE	1799305782	__Secure-3PAPISID	wyKQZVT2SfV8jBiN/AdiO8p-hnqhM5aDkE
+.youtube.com	TRUE	/	TRUE	1799305782	__Secure-3PSID	g.a0004Ag93th-uQEGMUsc0dbnOD5weLYmlpNs2E7Tuc8BniqKWhRt609bJRElueWG-gDkThTCXAACgYKASESARYSFQHGX2MiFbyb7TFahTUspmmfIft7fBoVAUF8yKq5PhfranzaHji4Vun6uugB0076
+.youtube.com	TRUE	/	TRUE	1764747580	GPS	1
+.youtube.com	TRUE	/	TRUE	1796281782	__Secure-1PSIDTS	sidts-CjUBwQ9iI6XfXekdZMsuzfVEzkf6mgz7u9shlubjINxxdMUybIMkzAx-S3mJMVZrDykRTf5vEhAA
+.youtube.com	TRUE	/	TRUE	1796281782	__Secure-3PSIDTS	sidts-CjUBwQ9iI6XfXekdZMsuzfVEzkf6mgz7u9shlubjINxxdMUybIMkzAx-S3mJMVZrDykRTf5vEhAA
+.youtube.com	TRUE	/	TRUE	1796281817	__Secure-3PSIDCC	AKEyXzXMWOozeAN-h45_4E0Jo1CSftxMeme_jQxWJ4qR3l32YiiiXKQzkJpbROEAHx9glcIj
+.youtube.com	TRUE	/	TRUE	1780162848	__Secure-YNID	13.YT=eW_DEvY0nKPAyupXJ_MwrqlCmxJF-ekRmbMMiWfPbhWSiChyhWJbFnSqwu2HIA7Fu7P1KwAZ4JA-9PGPLnnag5vxySMaRJvD93XU9D_mYqkcnAu-C-dk2clRyekRran_16TYIbKE1k-beXxum8JaegkKEO5-CHSyEFRUCGX_lxk2unsgkisqdN5PeFKU4UBgmRj2XaslFyoKK7rj-H2oOLK9q39x8GGViJM3SpULtp1CYZ1ndiusIIOjK8jKNEXxeeBoYp3La35nYeT4fY3y4-ikkJm2uKlubsj-KWoURs0Vb5381InK4S1eupijvDYNubw-WRsMCU5Kqil5MCdwoQ
+.youtube.com	TRUE	/	TRUE	1780297789	VISITOR_INFO1_LIVE	0J4vfYRCS1U
+.youtube.com	TRUE	/	TRUE	1780297789	VISITOR_PRIVACY_METADATA	CgJMSxIEGgAgKg%3D%3D
+.youtube.com	TRUE	/	TRUE	1780251597	__Secure-ROLLOUT_TOKEN	CLCS9Z_g0qvIahDSrqLW95yRAxiWusukwp-RAw%3D%3D
+.youtube.com	TRUE	/	TRUE	0	YSC	yF2rPN2NqSY
