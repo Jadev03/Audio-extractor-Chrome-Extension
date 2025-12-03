@@ -293,41 +293,19 @@ app.post("/extract", async (req: Request, res: Response) => {
     // Use python -m yt_dlp if yt-dlp is not in PATH (preferred in Docker)
     if (usePythonModule) {
       // Try multiple player clients to avoid bot detection
-      // Try more clients including tv and music which sometimes work better
-      const playerClients = ["tv", "music", "ios", "android", "web", "mweb"];
+      const playerClients = ["ios", "android", "web", "mweb"];
       let lastError: Error | null = null;
       let lastStderr = "";
       let lastStdout = "";
       
       const pythonCmd = process.platform === "win32" ? "python" : "python3";
       
-      // Check if cookies file exists (users can export cookies from browser)
-      const cookiesPath = path.join(__dirname, "..", "cookies.txt");
-      const hasCookies = fs.existsSync(cookiesPath);
-      
-      if (hasCookies) {
-        logger.info("Cookies file found, will use for authentication", { requestId, cookiesPath });
-      } else {
-        logger.info("No cookies file found. For better success rate, export cookies from browser", {
-          requestId,
-          hint: "See: https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
-        });
-      }
-      
       for (let i = 0; i < playerClients.length; i++) {
         const client = playerClients[i];
         logger.info(`Attempting extraction with ${client} client (attempt ${i + 1}/${playerClients.length})`, {
           requestId,
-          client,
-          hasCookies
+          client
         });
-        
-        // Add small random delay between attempts to appear more human-like (except first attempt)
-        if (i > 0) {
-          const delay = Math.floor(Math.random() * 2000) + 500; // 500-2500ms
-          logger.info(`Waiting ${delay}ms before next attempt`, { requestId });
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
         
         const args: string[] = [
           "-m", "yt_dlp",
@@ -343,11 +321,6 @@ app.post("/extract", async (req: Request, res: Response) => {
           "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", // Better user agent
           "--extractor-args", `youtube:player_client=${client}` // Try different player clients
         ];
-        
-        // Add cookies if available
-        if (hasCookies) {
-          args.push("--cookies", cookiesPath);
-        }
         
         // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
         if (ffmpegDir && ffmpegDir !== "") {
@@ -451,117 +424,59 @@ app.post("/extract", async (req: Request, res: Response) => {
         }
       }
       
-      // If all clients failed with bot detection, try one more time without extractor args
+      // If we exhausted all clients and still have an error, throw it
       if (lastError || (lastStderr && lastStdout)) {
         const fullOutput = lastStderr + "\n" + lastStdout;
-        const isBotError = fullOutput.toLowerCase().includes("sign in to confirm") || 
-                          fullOutput.toLowerCase().includes("not a bot") ||
-                          fullOutput.toLowerCase().includes("login_required");
+        let errorMessage = "Unknown error";
         
-        // Final attempt: try without extractor args (default client)
-        if (isBotError) {
-          logger.info("All player clients failed with bot detection, trying default client without extractor args", {
-            requestId
-          });
-          
-          await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
-          
-          const finalArgs: string[] = [
-            "-m", "yt_dlp",
-            cleanedUrl,
-            "--no-playlist",
-            "--extract-audio",
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "--format", "bestaudio[ext=m4a]/bestaudio/best[height<=720]/best",
-            "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100",
-            "--output", outputPath,
-            "--verbose",
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        // Parse error from last attempt
+        const errorMatch = fullOutput.match(/ERROR:\s*\[youtube\]\s*.+?:\s*(.+?)(?:\n|$)/i);
+        if (errorMatch) {
+          errorMessage = errorMatch[1].trim();
+        } else {
+          const patterns = [
+            /Sign in to confirm you['']re not a bot(.+?)(?:\n|$)/i,
+            /Sign in to confirm your age(.+?)(?:\n|$)/i,
+            /Video unavailable(.+?)(?:\n|$)/i,
+            /Private video(.+?)(?:\n|$)/i,
+            /Age-restricted(.+?)(?:\n|$)/i,
+            /Region blocked(.+?)(?:\n|$)/i,
+            /Unable to download(.+?)(?:\n|$)/i,
+            /LOGIN_REQUIRED/i
           ];
           
-          if (ffmpegDir && ffmpegDir !== "") {
-            finalArgs.splice(2, 0, "--ffmpeg-location", ffmpegDir);
-          }
-          
-          if (hasCookies) {
-            finalArgs.push("--cookies", cookiesPath);
-          }
-          
-          const finalResult = spawnSync(pythonCmd, finalArgs, {
-            stdio: "pipe",
-            shell: false,
-            encoding: "utf8",
-            timeout: 300000
-          });
-          
-          if (finalResult.status === 0) {
-            logger.info("yt-dlp execution succeeded with default client", { requestId });
-            // Success! Break out of error handling
-            lastError = null;
-            lastStderr = "";
-            lastStdout = "";
-          } else {
-            // Final attempt also failed, use the error from last attempt
-            lastStderr = finalResult.stderr?.toString() || lastStderr;
-            lastStdout = finalResult.stdout?.toString() || lastStdout;
+          for (const pattern of patterns) {
+            const match = fullOutput.match(pattern);
+            if (match) {
+              errorMessage = match[0].trim();
+              break;
+            }
           }
         }
         
-        // Parse and throw error if still failed
-        if (lastError || (lastStderr && lastStdout)) {
-          const fullOutput = lastStderr + "\n" + lastStdout;
-          let errorMessage = "Unknown error";
-          
-          const errorMatch = fullOutput.match(/ERROR:\s*\[youtube\]\s*.+?:\s*(.+?)(?:\n|$)/i);
-          if (errorMatch) {
-            errorMessage = errorMatch[1].trim();
-          } else {
-            const patterns = [
-              /Sign in to confirm you['']re not a bot(.+?)(?:\n|$)/i,
-              /Sign in to confirm your age(.+?)(?:\n|$)/i,
-              /Video unavailable(.+?)(?:\n|$)/i,
-              /Private video(.+?)(?:\n|$)/i,
-              /Age-restricted(.+?)(?:\n|$)/i,
-              /Region blocked(.+?)(?:\n|$)/i,
-              /Unable to download(.+?)(?:\n|$)/i,
-              /LOGIN_REQUIRED/i
-            ];
-            
-            for (const pattern of patterns) {
-              const match = fullOutput.match(pattern);
-              if (match) {
-                errorMessage = match[0].trim();
-                break;
-              }
-            }
-          }
-          
-          // Make error message more user-friendly
-          let userFriendlyError = errorMessage;
-          if (errorMessage.toLowerCase().includes("sign in to confirm") || errorMessage.toLowerCase().includes("not a bot")) {
-            userFriendlyError = "YouTube is blocking the request. To fix this, you can export cookies from your browser and place them in the Backend/cookies.txt file. See the documentation for instructions.";
-          } else if (errorMessage.toLowerCase().includes("login_required")) {
-            userFriendlyError = "This video requires login to access. Please try a different video that is publicly available.";
-          } else if (errorMessage.toLowerCase().includes("private video")) {
-            userFriendlyError = "This video is private and cannot be accessed.";
-          } else if (errorMessage.toLowerCase().includes("age-restricted")) {
-            userFriendlyError = "This video is age-restricted and cannot be downloaded without authentication.";
-          } else if (errorMessage.toLowerCase().includes("region blocked") || errorMessage.toLowerCase().includes("not available")) {
-            userFriendlyError = "This video is not available in your region or has been removed.";
-          }
-          
-          logger.error("yt-dlp execution failed after trying all methods", {
-            requestId,
-            parsedError: errorMessage,
-            userFriendlyError,
-            fullStderr: lastStderr.substring(0, 3000),
-            fullStdout: lastStdout.substring(0, 3000),
-            suggestion: hasCookies ? "Cookies were used but still failed" : "Consider exporting cookies from browser"
-          });
-          
-          throw new Error(userFriendlyError);
+        // Make error message more user-friendly
+        let userFriendlyError = errorMessage;
+        if (errorMessage.toLowerCase().includes("sign in to confirm") || errorMessage.toLowerCase().includes("not a bot")) {
+          userFriendlyError = "YouTube is blocking the request. This video may require authentication or is temporarily unavailable. Please try again later or try a different video.";
+        } else if (errorMessage.toLowerCase().includes("login_required")) {
+          userFriendlyError = "This video requires login to access. Please try a different video that is publicly available.";
+        } else if (errorMessage.toLowerCase().includes("private video")) {
+          userFriendlyError = "This video is private and cannot be accessed.";
+        } else if (errorMessage.toLowerCase().includes("age-restricted")) {
+          userFriendlyError = "This video is age-restricted and cannot be downloaded without authentication.";
+        } else if (errorMessage.toLowerCase().includes("region blocked") || errorMessage.toLowerCase().includes("not available")) {
+          userFriendlyError = "This video is not available in your region or has been removed.";
         }
+        
+        logger.error("yt-dlp execution failed after trying all player clients", {
+          requestId,
+          parsedError: errorMessage,
+          userFriendlyError,
+          fullStderr: lastStderr.substring(0, 3000),
+          fullStdout: lastStdout.substring(0, 3000)
+        });
+        
+        throw new Error(userFriendlyError);
       }
       
       logger.info("yt-dlp execution completed successfully", { requestId });
