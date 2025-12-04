@@ -53,7 +53,7 @@ if (process.env.NODE_ENV !== "production") {
 import express, { Request, Response } from "express";
 import cors from "cors";
 import { createRequire } from "module";
-import { execSync, spawnSync } from "child_process";
+import { execSync, spawnSync, spawn } from "child_process";
 import logger, { auditLog } from "./logger.js";
 import { uploadToDrive, getAuthUrl, getTokenFromCode, isDriveConfigured } from "./driveService.js";
 
@@ -111,7 +111,7 @@ try {
 }
 
 // FFmpeg path configuration
-const ffmpegDir = "C:\\Users\\THABENDRA\\Desktop\\ffmpeg-2025-06-02-git-688f3944ce-full_build\\ffmpeg-build\\bin";
+const ffmpegDir = "D:\\ffmpeg\\bin";
 const ffmpegPath = path.join(ffmpegDir, "ffmpeg.exe");
 
 // Verify ffmpeg exists
@@ -157,14 +157,17 @@ app.post("/extract", async (req: Request, res: Response) => {
     });
   }
 
-  const outputPath = path.join(downloadsDir, `audio-${Date.now()}.mp3`);
+  const timestamp = Date.now();
+  const mp3OutputPath = path.join(downloadsDir, `audio-${timestamp}.mp3`);
+  const wavOutputPath = path.join(downloadsDir, `audio-${timestamp}.wav`);
+  const vadOutputDir = path.join(downloadsDir, `audio-${timestamp}-segments`);
   const startTime = Date.now();
 
   try {
     logger.info("Starting audio extraction", {
       requestId,
       youtubeUrl,
-      outputPath
+      outputPath: mp3OutputPath
     });
 
     // Use python -m yt_dlp if yt-dlp is not in PATH
@@ -181,7 +184,7 @@ app.post("/extract", async (req: Request, res: Response) => {
         "--audio-quality", "0", // Best quality
         "--format", "bestaudio/best", // Prefer best audio format
         "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
-        "--output", outputPath
+        "--output", mp3OutputPath
       ];
       
       const result = spawnSync("python", args, {
@@ -206,17 +209,49 @@ app.post("/extract", async (req: Request, res: Response) => {
         "--audio-quality", "0", // Best quality
         "--format", "bestaudio/best", // Prefer best audio format
         "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
-        "--output", outputPath
+        "--output", mp3OutputPath
       ]);
     }
 
     // Check if file was created
-    if (!fs.existsSync(outputPath)) {
+    if (!fs.existsSync(mp3OutputPath)) {
       throw new Error("Audio file was not created");
     }
 
-    const fileName = path.basename(outputPath);
-    const fileSize = fs.statSync(outputPath).size;
+    logger.info("Converting MP3 to WAV", { requestId, source: mp3OutputPath, target: wavOutputPath });
+    await convertMp3ToWav({
+      ffmpegPath,
+      inputFile: mp3OutputPath,
+      outputFile: wavOutputPath,
+      sampleRate: 16000,
+      channels: 1
+    });
+
+    // Delete MP3 after successful conversion to save space
+    try {
+      fs.unlinkSync(mp3OutputPath);
+      logger.info("Source MP3 deleted after WAV conversion", { requestId, file: mp3OutputPath });
+    } catch (deleteErr) {
+      logger.warn("Failed to delete MP3 after WAV conversion", {
+        requestId,
+        file: mp3OutputPath,
+        error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr)
+      });
+    }
+
+    logger.info("Running VAD segmentation", { requestId, wavOutputPath, vadOutputDir });
+    const vadResult = await runSileroVad({
+      pythonBin: process.env.PYTHON_BIN || "python",
+      inputWav: wavOutputPath,
+      outputDir: vadOutputDir,
+      minSilenceMs: Number(process.env.VAD_MIN_SILENCE_MS) || 400,
+      minSpeechMs: Number(process.env.VAD_MIN_SPEECH_MS) || 1200,
+      sentencePauseMs: Number(process.env.VAD_SENTENCE_PAUSE_MS) || 800,
+      maxSegmentSeconds: Number(process.env.VAD_MAX_SEGMENT_SECONDS) || 30
+    });
+
+    const fileName = path.basename(wavOutputPath);
+    const fileSize = fs.statSync(wavOutputPath).size;
     const duration = Date.now() - startTime;
 
     logger.info("Audio extraction successful", {
@@ -232,7 +267,7 @@ app.post("/extract", async (req: Request, res: Response) => {
     if (isDriveConfigured()) {
       try {
         logger.info("Uploading to Google Drive", { requestId, fileName });
-        driveFileInfo = await uploadToDrive(outputPath, fileName);
+        driveFileInfo = await uploadToDrive(wavOutputPath, fileName);
         
         logger.info("File uploaded to Google Drive successfully", {
           requestId,
@@ -299,12 +334,12 @@ app.post("/extract", async (req: Request, res: Response) => {
         };
         
         try {
-          const deleted = await deleteLocalFile(outputPath);
+          const deleted = await deleteLocalFile(wavOutputPath);
           if (!deleted) {
             logger.error("Failed to delete local file after multiple attempts (file is in Drive)", {
               requestId,
               fileName,
-              filePath: outputPath
+              filePath: wavOutputPath
             });
           }
         } catch (deleteError) {
@@ -312,7 +347,7 @@ app.post("/extract", async (req: Request, res: Response) => {
           logger.error("Failed to delete local file after upload (file is in Drive)", {
             requestId,
             fileName,
-            filePath: outputPath,
+            filePath: wavOutputPath,
             error: deleteError instanceof Error ? deleteError.message : String(deleteError),
             stack: deleteError instanceof Error ? deleteError.stack : undefined
           });
@@ -342,7 +377,10 @@ app.post("/extract", async (req: Request, res: Response) => {
       fileUrl: driveFileInfo?.webViewLink || `http://localhost:5000/downloads/${fileName}`,
       driveFileId: driveFileInfo?.fileId || null,
       driveWebViewLink: driveFileInfo?.webViewLink || null,
-      localFileUrl: driveFileInfo ? null : `http://localhost:5000/downloads/${fileName}`
+      localFileUrl: driveFileInfo ? null : `http://localhost:5000/downloads/${fileName}`,
+      wavFile: driveFileInfo ? driveFileInfo.webViewLink : `http://localhost:5000/downloads/${fileName}`,
+      vadSegments: vadResult?.segments || [],
+      vadSegmentsDir: vadResult?.segmentsDir || null
     });
 
   } catch (err) {
@@ -383,6 +421,126 @@ app.post("/extract", async (req: Request, res: Response) => {
     });
   }
 });
+
+type ConvertParams = {
+  ffmpegPath: string;
+  inputFile: string;
+  outputFile: string;
+  sampleRate: number;
+  channels: number;
+};
+
+const convertMp3ToWav = (options: ConvertParams) => {
+  const { ffmpegPath, inputFile, outputFile, sampleRate, channels } = options;
+  const ffmpegBinary = fs.existsSync(ffmpegPath) ? ffmpegPath : "ffmpeg";
+
+  return new Promise<void>((resolve, reject) => {
+    const args = [
+      "-y",
+      "-i",
+      inputFile,
+      "-ac",
+      channels.toString(),
+      "-ar",
+      sampleRate.toString(),
+      outputFile
+    ];
+
+    const ffmpegProcess = spawn(ffmpegBinary, args, { stdio: "inherit", shell: false });
+
+    ffmpegProcess.on("error", (error) => reject(error));
+    ffmpegProcess.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`FFmpeg exited with code ${code}`));
+      }
+    });
+  });
+};
+
+type VadParams = {
+  pythonBin: string;
+  inputWav: string;
+  outputDir: string;
+  minSilenceMs: number;
+  minSpeechMs: number;
+  sentencePauseMs: number;
+  maxSegmentSeconds: number;
+};
+
+type VadResult = {
+  segments: Array<{ file: string; start: number; end: number }>;
+  segmentsDir: string;
+  segmentsCount: number;
+  totalSpeechMs: number;
+};
+
+const runSileroVad = (params: VadParams): Promise<VadResult> => {
+  const vadScriptPath = path.join(__dirname, "vad_split.py");
+
+  if (!fs.existsSync(vadScriptPath)) {
+    throw new Error(`VAD script not found at ${vadScriptPath}`);
+  }
+
+  return new Promise((resolve, reject) => {
+    const args = [
+      vadScriptPath,
+      "--input",
+      params.inputWav,
+      "--output",
+      params.outputDir,
+      "--min-silence",
+      params.minSilenceMs.toString(),
+      "--min-speech",
+      params.minSpeechMs.toString(),
+      "--sentence-pause",
+      params.sentencePauseMs.toString(),
+      "--max-segment-seconds",
+      params.maxSegmentSeconds.toString()
+    ];
+
+    const pythonProcess = spawn(params.pythonBin, args, { shell: false });
+    let stdout = "";
+    let stderr = "";
+
+    pythonProcess.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    pythonProcess.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    pythonProcess.on("error", (error) => {
+      reject(error);
+    });
+
+    pythonProcess.on("close", (code) => {
+      if (code !== 0) {
+        return reject(new Error(stderr || `VAD script exited with code ${code}`));
+      }
+
+      try {
+        const parsed = JSON.parse(stdout);
+        resolve({
+          segments: parsed.segments || [],
+          segmentsDir: params.outputDir,
+          segmentsCount: parsed.segmentsCount || parsed.segments?.length || 0,
+          totalSpeechMs: parsed.totalSpeechMs || 0
+        });
+      } catch (err) {
+        reject(
+          new Error(
+            `Failed to parse VAD output: ${
+              err instanceof Error ? err.message : String(err)
+            } | Raw output: ${stdout}`
+          )
+        );
+      }
+    });
+  });
+};
 
 // Google Drive OAuth endpoints
 app.get("/auth/google", (req: Request, res: Response) => {
