@@ -4,6 +4,9 @@ import json
 import os
 from pathlib import Path
 from typing import List, Tuple
+import sys
+import contextlib
+import io
 
 import numpy as np
 import torch
@@ -117,6 +120,7 @@ def main():
     parser = argparse.ArgumentParser(description="Split audio using Silero VAD without breaking sentences.")
     parser.add_argument("--input", required=True, help="Path to input WAV file (16kHz mono).")
     parser.add_argument("--output", required=True, help="Directory to store speech segments.")
+    parser.add_argument("--prefix", type=str, default="segment", help="Prefix for segment filenames (default: 'segment').")
     parser.add_argument("--min-silence", type=int, default=int(os.getenv("VAD_MIN_SILENCE_MS", 650)))
     parser.add_argument("--min-speech", type=int, default=int(os.getenv("VAD_MIN_SPEECH_MS", 900)))
     parser.add_argument("--sentence-pause", type=int, default=int(os.getenv("VAD_SENTENCE_PAUSE_MS", 1100)))
@@ -133,11 +137,12 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model, utils = torch.hub.load(
-        repo_or_dir="snakers4/silero-vad",
-        model="silero_vad",
-        trust_repo=True
-    )
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        model, utils = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            trust_repo=True
+        )
 
     (get_speech_timestamps,
      save_audio_fn,
@@ -188,7 +193,7 @@ def main():
 
             end_idx = min(seg_end + padding_samples, wav.shape[0])
             chunk = wav[start_idx:end_idx]
-            out_path = Path(args.output) / f"segment_{segment_counter:03d}.wav"
+            out_path = Path(args.output) / f"{args.prefix}_{segment_counter:03d}.wav"
             save_audio(out_path, chunk, sample_rate)
 
             start_time = start_idx / sample_rate

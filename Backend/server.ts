@@ -55,7 +55,7 @@ import cors from "cors";
 import { createRequire } from "module";
 import { execSync, spawnSync, spawn } from "child_process";
 import logger, { auditLog } from "./logger.js";
-import { uploadToDrive, getAuthUrl, getTokenFromCode, isDriveConfigured } from "./driveService.js";
+import { uploadMultipleToDrive, getAuthUrl, getTokenFromCode, isDriveConfigured } from "./driveService.js";
 
 // Import yt-dlp-wrap as CommonJS module using createRequire
 const require = createRequire(import.meta.url);
@@ -240,10 +240,12 @@ app.post("/extract", async (req: Request, res: Response) => {
     }
 
     logger.info("Running VAD segmentation", { requestId, wavOutputPath, vadOutputDir });
+    const segmentPrefix = `audio-${timestamp}`;
     const vadResult = await runSileroVad({
       pythonBin: process.env.PYTHON_BIN || "python",
       inputWav: wavOutputPath,
       outputDir: vadOutputDir,
+      prefix: segmentPrefix,
       minSilenceMs: Number(process.env.VAD_MIN_SILENCE_MS) || 400,
       minSpeechMs: Number(process.env.VAD_MIN_SPEECH_MS) || 1200,
       sentencePauseMs: Number(process.env.VAD_SENTENCE_PAUSE_MS) || 800,
@@ -254,112 +256,111 @@ app.post("/extract", async (req: Request, res: Response) => {
     const fileSize = fs.statSync(wavOutputPath).size;
     const duration = Date.now() - startTime;
 
+    // Upload segments to Google Drive if configured (skip main WAV file)
+    let segmentUploadInfo = null;
+    if (isDriveConfigured() && vadResult.segments && vadResult.segments.length > 0) {
+      try {
+        logger.info("Uploading segments to Google Drive", {
+          requestId,
+          segmentsCount: vadResult.segments.length,
+          segmentsDir: vadResult.segmentsDir
+        });
+
+        // Prepare segment files for upload (upload directly to main folder, no subfolder)
+        const segmentFiles = vadResult.segments.map((seg: any) => ({
+          filePath: seg.file,
+          fileName: path.basename(seg.file)
+        }));
+
+        // Upload all segments directly to main Drive folder
+        const uploadedSegments = await uploadMultipleToDrive(segmentFiles);
+
+        segmentUploadInfo = {
+          uploadedCount: uploadedSegments.length,
+          totalCount: vadResult.segments.length,
+          segments: uploadedSegments.map((uploaded, idx) => {
+            const originalSeg = vadResult.segments[idx] as any;
+            return {
+              ...uploaded,
+              originalIndex: idx + 1,
+              durationMs: originalSeg?.durationMs || (originalSeg?.end && originalSeg?.start ? (originalSeg.end - originalSeg.start) * 1000 : 0)
+            };
+          })
+        };
+
+        logger.info("Segments uploaded to Google Drive successfully", {
+          requestId,
+          uploadedCount: uploadedSegments.length,
+          totalCount: vadResult.segments.length
+        });
+
+        // Only delete local files if all segments were successfully uploaded
+        if (uploadedSegments.length === vadResult.segments.length) {
+          // Delete local segment files after successful upload
+          let deletedCount = 0;
+          for (const seg of vadResult.segments) {
+            try {
+              if (fs.existsSync(seg.file)) {
+                fs.unlinkSync(seg.file);
+                deletedCount++;
+                logger.debug("Deleted local segment file", { requestId, file: seg.file });
+              }
+            } catch (deleteErr) {
+              logger.warn("Failed to delete local segment file", {
+                requestId,
+                file: seg.file,
+                error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr)
+              });
+            }
+          }
+          logger.info("Local segment files deleted after upload", {
+            requestId,
+            deletedCount,
+            totalCount: vadResult.segments.length
+          });
+
+          // Also delete the main WAV file after all segments are uploaded
+          try {
+            if (fs.existsSync(wavOutputPath)) {
+              // Wait a bit to ensure file handles are released
+              await new Promise(resolve => setTimeout(resolve, 500));
+              fs.unlinkSync(wavOutputPath);
+              logger.info("Main WAV file deleted after segment upload", {
+                requestId,
+                file: wavOutputPath
+              });
+            }
+          } catch (deleteErr) {
+            logger.warn("Failed to delete main WAV file", {
+              requestId,
+              file: wavOutputPath,
+              error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr)
+            });
+          }
+        } else {
+          logger.warn("Not all segments uploaded successfully, keeping local files", {
+            requestId,
+            uploadedCount: uploadedSegments.length,
+            totalCount: vadResult.segments.length
+          });
+        }
+      } catch (segmentUploadError) {
+        logger.error("Failed to upload segments to Google Drive", {
+          requestId,
+          error: segmentUploadError instanceof Error ? segmentUploadError.message : String(segmentUploadError)
+        });
+        // Don't fail the entire request if segment upload fails
+      }
+    }
+
     logger.info("Audio extraction successful", {
       requestId,
       youtubeUrl,
       fileName,
       fileSize: `${(fileSize / 1024 / 1024).toFixed(2)} MB`,
-      duration: `${duration}ms`
+      duration: `${duration}ms`,
+      segmentsCount: vadResult?.segmentsCount || 0
     });
-
-    // Upload to Google Drive if configured
-    let driveFileInfo = null;
-    if (isDriveConfigured()) {
-      try {
-        logger.info("Uploading to Google Drive", { requestId, fileName });
-        driveFileInfo = await uploadToDrive(wavOutputPath, fileName);
-        
-        logger.info("File uploaded to Google Drive successfully", {
-          requestId,
-          fileId: driveFileInfo.fileId,
-          webViewLink: driveFileInfo.webViewLink
-        });
-
-        // Delete local file after successful upload to save disk space
-        const deleteLocalFile = async (filePath: string, maxRetries = 3) => {
-          for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-              // Wait a bit longer on Windows to ensure file handles are released
-              await new Promise(resolve => setTimeout(resolve, attempt * 200));
-              
-              if (!fs.existsSync(filePath)) {
-                logger.info("Local file already deleted", {
-                  requestId,
-                  fileName,
-                  filePath,
-                  attempt
-                });
-                return true;
-              }
-              
-              const fileStats = fs.statSync(filePath);
-              
-              // Try to delete the file
-              fs.unlinkSync(filePath);
-              
-              // Verify deletion
-              await new Promise(resolve => setTimeout(resolve, 100));
-              if (!fs.existsSync(filePath)) {
-                logger.info("Local file deleted after successful Google Drive upload", {
-                  requestId,
-                  fileName,
-                  filePath,
-                  fileSize: `${(fileStats.size / 1024 / 1024).toFixed(2)} MB`,
-                  attempt
-                });
-                return true;
-              } else {
-                logger.warn("File still exists after deletion attempt", {
-                  requestId,
-                  fileName,
-                  filePath,
-                  attempt,
-                  maxRetries
-                });
-              }
-            } catch (deleteError) {
-              if (attempt === maxRetries) {
-                throw deleteError;
-              }
-              logger.warn("Deletion attempt failed, retrying", {
-                requestId,
-                fileName,
-                filePath,
-                attempt,
-                error: deleteError instanceof Error ? deleteError.message : String(deleteError)
-              });
-            }
-          }
-          return false;
-        };
-        
-        try {
-          const deleted = await deleteLocalFile(wavOutputPath);
-          if (!deleted) {
-            logger.error("Failed to delete local file after multiple attempts (file is in Drive)", {
-              requestId,
-              fileName,
-              filePath: wavOutputPath
-            });
-          }
-        } catch (deleteError) {
-          // Log error but don't fail the request - file is already uploaded to Drive
-          logger.error("Failed to delete local file after upload (file is in Drive)", {
-            requestId,
-            fileName,
-            filePath: wavOutputPath,
-            error: deleteError instanceof Error ? deleteError.message : String(deleteError),
-            stack: deleteError instanceof Error ? deleteError.stack : undefined
-          });
-        }
-      } catch (driveError) {
-        logger.error("Failed to upload to Google Drive, keeping local file", {
-          requestId,
-          error: driveError instanceof Error ? driveError.message : String(driveError)
-        });
-        // Continue with local file URL if Drive upload fails
-      }
-    }
 
     auditLog("EXTRACTION_SUCCESS", {
       requestId,
@@ -367,20 +368,24 @@ app.post("/extract", async (req: Request, res: Response) => {
       fileName,
       fileSize,
       duration,
-      driveFileId: driveFileInfo?.fileId || null,
+      segmentsCount: vadResult?.segmentsCount || 0,
+      segmentsUploaded: segmentUploadInfo?.uploadedCount || 0,
       ip: req.ip || req.socket.remoteAddress
     });
 
-    // Return Google Drive link if available, otherwise local file URL
+    // Return response with segment information
     res.json({
       success: true,
-      fileUrl: driveFileInfo?.webViewLink || `http://localhost:5000/downloads/${fileName}`,
-      driveFileId: driveFileInfo?.fileId || null,
-      driveWebViewLink: driveFileInfo?.webViewLink || null,
-      localFileUrl: driveFileInfo ? null : `http://localhost:5000/downloads/${fileName}`,
-      wavFile: driveFileInfo ? driveFileInfo.webViewLink : `http://localhost:5000/downloads/${fileName}`,
+      segmentsCount: vadResult?.segmentsCount || 0,
       vadSegments: vadResult?.segments || [],
-      vadSegmentsDir: vadResult?.segmentsDir || null
+      segmentsUploaded: segmentUploadInfo ? {
+        uploadedCount: segmentUploadInfo.uploadedCount,
+        totalCount: segmentUploadInfo.totalCount,
+        segments: segmentUploadInfo.segments
+      } : null,
+      message: segmentUploadInfo 
+        ? `${segmentUploadInfo.uploadedCount} segments uploaded to Google Drive`
+        : "Segments created locally (Google Drive not configured)"
     });
 
   } catch (err) {
@@ -463,6 +468,7 @@ type VadParams = {
   pythonBin: string;
   inputWav: string;
   outputDir: string;
+  prefix: string;
   minSilenceMs: number;
   minSpeechMs: number;
   sentencePauseMs: number;
@@ -490,6 +496,8 @@ const runSileroVad = (params: VadParams): Promise<VadResult> => {
       params.inputWav,
       "--output",
       params.outputDir,
+      "--prefix",
+      params.prefix,
       "--min-silence",
       params.minSilenceMs.toString(),
       "--min-speech",

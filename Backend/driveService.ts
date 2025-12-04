@@ -279,21 +279,9 @@ export async function uploadToDrive(
       fileMetadata.parents = [DRIVE_FOLDER_ID];
     }
 
-    // Create read stream and ensure it's properly closed after upload
-    const fileStream = fs.createReadStream(filePath);
-    
-    // Handle stream errors
-    fileStream.on('error', (error) => {
-      logger.error("File stream error during upload", {
-        fileName,
-        filePath,
-        error: error.message
-      });
-    });
-    
     const media = {
       mimeType: "audio/mpeg",
-      body: fileStream,
+      body: fs.createReadStream(filePath),
     };
 
     logger.info("Uploading file to Google Drive", {
@@ -307,11 +295,6 @@ export async function uploadToDrive(
       media: media,
       fields: "id, name, webViewLink, webContentLink",
     });
-    
-    // Ensure stream is closed after upload completes
-    if (!fileStream.destroyed) {
-      fileStream.destroy();
-    }
 
     if (!response.data.id) {
       throw new Error("Failed to upload file - no file ID returned");
@@ -381,6 +364,154 @@ export async function uploadToDrive(
 }
 
 /**
+ * Create a folder in Google Drive
+ * @param folderName Name for the folder
+ * @param parentFolderId Optional parent folder ID (defaults to DRIVE_FOLDER_ID)
+ * @returns Promise with folder ID
+ */
+export async function createDriveFolder(
+  folderName: string,
+  parentFolderId?: string
+): Promise<string> {
+  if (!isDriveConfigured()) {
+    throw new Error(
+      "Google Drive credentials not configured. " +
+      "Please set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN in .env file."
+    );
+  }
+
+  try {
+    const drive = getDriveClient();
+    const parentId = parentFolderId || DRIVE_FOLDER_ID;
+
+    const fileMetadata: any = {
+      name: folderName,
+      mimeType: "application/vnd.google-apps.folder",
+    };
+
+    if (parentId) {
+      fileMetadata.parents = [parentId];
+    }
+
+    logger.info("Creating folder in Google Drive", {
+      folderName,
+      parentId: parentId || "root"
+    });
+
+    const response = await drive.files.create({
+      requestBody: fileMetadata,
+      fields: "id, name",
+    });
+
+    if (!response.data.id) {
+      throw new Error("Failed to create folder - no folder ID returned");
+    }
+
+    logger.info("Folder created successfully in Google Drive", {
+      folderId: response.data.id,
+      folderName: response.data.name
+    });
+
+    return response.data.id;
+  } catch (error) {
+    logger.error("Error creating folder in Google Drive", {
+      error: error instanceof Error ? error.message : String(error),
+      folderName
+    });
+    throw error;
+  }
+}
+
+/**
+ * Upload multiple files to Google Drive
+ * @param files Array of objects with filePath and fileName
+ * @param folderId Optional folder ID to upload to (defaults to DRIVE_FOLDER_ID)
+ * @returns Promise with array of uploaded file info
+ */
+export async function uploadMultipleToDrive(
+  files: Array<{ filePath: string; fileName: string }>,
+  folderId?: string
+): Promise<Array<{ fileId: string; fileName: string; webViewLink: string }>> {
+  if (!isDriveConfigured()) {
+    throw new Error(
+      "Google Drive credentials not configured. " +
+      "Please set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN in .env file."
+    );
+  }
+
+  const results: Array<{ fileId: string; fileName: string; webViewLink: string }> = [];
+  const targetFolderId = folderId || DRIVE_FOLDER_ID;
+
+  for (const file of files) {
+    try {
+      if (!fs.existsSync(file.filePath)) {
+        logger.warn("File not found, skipping upload", {
+          fileName: file.fileName,
+          filePath: file.filePath
+        });
+        continue;
+      }
+
+      const drive = getDriveClient();
+      const fileMetadata: any = {
+        name: file.fileName,
+      };
+
+      if (targetFolderId) {
+        fileMetadata.parents = [targetFolderId];
+      }
+
+      // Determine MIME type based on file extension
+      const ext = path.extname(file.fileName).toLowerCase();
+      let mimeType = "audio/wav";
+      if (ext === ".mp3") {
+        mimeType = "audio/mpeg";
+      } else if (ext === ".wav") {
+        mimeType = "audio/wav";
+      }
+
+      const media = {
+        mimeType: mimeType,
+        body: fs.createReadStream(file.filePath),
+      };
+
+      logger.info("Uploading segment to Google Drive", {
+        fileName: file.fileName,
+        filePath: file.filePath,
+        folderId: targetFolderId || "root"
+      });
+
+      const response = await drive.files.create({
+        requestBody: fileMetadata,
+        media: media,
+        fields: "id, name, webViewLink",
+      });
+
+      if (response.data.id) {
+        results.push({
+          fileId: response.data.id,
+          fileName: response.data.name || file.fileName,
+          webViewLink: response.data.webViewLink || ""
+        });
+        logger.info("Segment uploaded successfully", {
+          fileId: response.data.id,
+          fileName: file.fileName
+        });
+      }
+    } catch (error) {
+      logger.error("Error uploading segment to Google Drive", {
+        error: error instanceof Error ? error.message : String(error),
+        fileName: file.fileName,
+        filePath: file.filePath
+      });
+      // Continue with other files even if one fails
+    }
+  }
+
+  return results;
+}
+
+/**
  * Delete a file from Google Drive
  * @param fileId Google Drive file ID
  */
@@ -397,4 +528,3 @@ export async function deleteFromDrive(fileId: string): Promise<void> {
     throw error;
   }
 }
-
