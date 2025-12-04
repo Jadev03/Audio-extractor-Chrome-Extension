@@ -9,6 +9,7 @@ token.json
 *.pem
 *.key
 
+cookies.json
 #some readme file
 GOOGLE_DRIVE_SETUP.md
 GOOGLE_DRIVE_QUICK_START.md
