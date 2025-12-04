@@ -292,137 +292,133 @@ app.post("/extract", async (req: Request, res: Response) => {
 
     // Use python -m yt_dlp if yt-dlp is not in PATH (preferred in Docker)
     if (usePythonModule) {
-      // Check for proxy configuration (from environment or .env)
-      const proxyUrl = process.env.YT_DLP_PROXY || process.env.PROXY_URL || null;
-      if (proxyUrl) {
-        logger.info("Proxy configured for yt-dlp", { requestId, proxy: proxyUrl.substring(0, 20) + "..." });
-      }
+      // Get proxy list from environment (comma-separated)
+      const proxyListStr = process.env.YT_DLP_PROXY_LIST || process.env.YT_DLP_PROXY || process.env.PROXY_URL || "";
+      const proxyList = proxyListStr ? proxyListStr.split(",").map(p => p.trim()).filter(p => p) : [];
       
-      // Check if cookies file exists
-      const cookiesPath = path.join(__dirname, "..", "cookies.txt");
-      const hasCookies = fs.existsSync(cookiesPath);
-      if (hasCookies) {
-        logger.info("Cookies file found, will use for authentication", { requestId, cookiesPath });
-      }
+      // Realistic browser user agents (rotate randomly)
+      const userAgents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
+      ];
       
-      // Try multiple player clients to avoid bot detection
-      const playerClients = ["tv", "music", "ios", "android", "web", "mweb"];
       let lastError: Error | null = null;
       let lastStderr = "";
       let lastStdout = "";
       
       const pythonCmd = process.platform === "win32" ? "python" : "python3";
       
-      for (let i = 0; i < playerClients.length; i++) {
-        const client = playerClients[i];
-        logger.info(`Attempting extraction with ${client} client (attempt ${i + 1}/${playerClients.length})`, {
+      // Try with each proxy (or no proxy if list is empty)
+      const proxiesToTry = proxyList.length > 0 ? proxyList : [null];
+      
+      for (let proxyIndex = 0; proxyIndex < proxiesToTry.length; proxyIndex++) {
+        const proxyUrl = proxiesToTry[proxyIndex];
+        const randomUserAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+        
+        logger.info(`Attempting extraction (attempt ${proxyIndex + 1}/${proxiesToTry.length})`, {
           requestId,
-          client
+          proxy: proxyUrl ? proxyUrl.substring(0, 30) + "..." : "none",
+          userAgent: randomUserAgent.substring(0, 50) + "..."
         });
+        
+        // Add random delay between attempts (1-3 seconds)
+        if (proxyIndex > 0) {
+          const delay = Math.floor(Math.random() * 2000) + 1000;
+          logger.info(`Waiting ${delay}ms before retry`, { requestId });
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
         
         const args: string[] = [
           "-m", "yt_dlp",
-          cleanedUrl, // Use cleaned URL without playlist parameters
-          "--no-playlist", // Only download single video, not entire playlist
-          "--extract-audio", // Extract audio only
-          "--audio-format", "mp3", // Convert to MP3
-          "--audio-quality", "0", // Best quality
-          "--format", "bestaudio[ext=m4a]/bestaudio/best[height<=720]/best", // Better format selection with fallbacks
-          "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
+          cleanedUrl,
+          "--no-playlist",
+          "--extract-audio",
+          "--audio-format", "mp3",
+          "--audio-quality", "0",
+          "--format", "bestaudio[ext=m4a]/bestaudio/best",
+          "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100",
           "--output", outputPath,
-          "--verbose", // Keep verbose for debugging
-          "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", // Better user agent
-          "--extractor-args", `youtube:player_client=${client}` // Try different player clients
+          "--user-agent", randomUserAgent,
+          "--referer", "https://www.youtube.com/",
+          "--add-header", "Accept-Language:en-US,en;q=0.9",
+          "--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "--socket-timeout", "30",
+          "--retries", "3"
         ];
         
         // Add proxy if configured
         if (proxyUrl) {
           args.push("--proxy", proxyUrl);
-          logger.info(`Using proxy for extraction`, { requestId, client, proxy: proxyUrl.substring(0, 30) + "..." });
         }
         
-        // Add cookies if available
-        if (hasCookies) {
-          args.push("--cookies", cookiesPath);
-        }
-        
-        // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
+        // Only add ffmpeg-location if ffmpegDir is specified
         if (ffmpegDir && ffmpegDir !== "") {
           args.splice(2, 0, "--ffmpeg-location", ffmpegDir);
         }
         
         const result = spawnSync(pythonCmd, args, {
-          stdio: "pipe", // Capture output for error messages
+          stdio: "pipe",
           shell: false,
           encoding: "utf8",
           timeout: 300000 // 5 minute timeout
         });
         
-        // Log output for debugging
         const stdout = result.stdout?.toString() || "";
         const stderr = result.stderr?.toString() || "";
         
         if (result.error) {
           logger.error("yt-dlp spawn error", {
             requestId,
-            client,
-            error: result.error.message,
-            stack: result.error.stack
+            proxy: proxyUrl ? proxyUrl.substring(0, 30) + "..." : "none",
+            error: result.error.message
           });
           lastError = result.error;
-          continue; // Try next client
+          continue; // Try next proxy
         }
         
         if (result.status === 0) {
-          // Success! Log and break
-          logger.info(`yt-dlp execution completed successfully with ${client} client`, { 
+          // Success!
+          logger.info(`yt-dlp execution completed successfully`, { 
             requestId,
-            client 
+            proxy: proxyUrl ? proxyUrl.substring(0, 30) + "..." : "none"
           });
-          if (stdout) {
-            logger.info("yt-dlp stdout", {
-              requestId,
-              output: stdout.substring(0, 2000)
-            });
-          }
           break; // Success, exit loop
         }
-        
-        // Check if it's a bot detection error
-        const fullOutput = stderr + "\n" + stdout;
-        const isBotError = fullOutput.toLowerCase().includes("sign in to confirm") || 
-                          fullOutput.toLowerCase().includes("not a bot") ||
-                          fullOutput.toLowerCase().includes("login_required");
         
         // Store error info
         lastStderr = stderr;
         lastStdout = stdout;
+        const fullOutput = stderr + "\n" + stdout;
         
-        if (isBotError && i < playerClients.length - 1) {
-          // Bot detection error and we have more clients to try
-          logger.warn(`Bot detection with ${client} client, trying next client`, {
+        // Check if it's a bot detection error
+        const isBotError = fullOutput.toLowerCase().includes("sign in to confirm") || 
+                          fullOutput.toLowerCase().includes("not a bot") ||
+                          fullOutput.toLowerCase().includes("login_required");
+        
+        if (isBotError && proxyIndex < proxiesToTry.length - 1) {
+          logger.warn(`Bot detection with current proxy, trying next proxy`, {
             requestId,
-            client,
-            attempt: i + 1
+            proxy: proxyUrl ? proxyUrl.substring(0, 30) + "..." : "none",
+            attempt: proxyIndex + 1
           });
-          continue; // Try next client
-        } else if (i < playerClients.length - 1) {
-          // Not a bot error, but we have more clients - try next one
-          logger.warn(`Extraction failed with ${client} client, trying next client`, {
+          continue; // Try next proxy
+        } else if (proxyIndex < proxiesToTry.length - 1) {
+          logger.warn(`Extraction failed with current proxy, trying next proxy`, {
             requestId,
-            client,
-            attempt: i + 1,
+            proxy: proxyUrl ? proxyUrl.substring(0, 30) + "..." : "none",
+            attempt: proxyIndex + 1,
             exitCode: result.status
           });
-          continue; // Try next client
+          continue; // Try next proxy
         } else {
-          // Last client failed - parse and throw error
+          // Last proxy failed - parse error
           let errorMessage = "Unknown error";
           const errorMatch = fullOutput.match(/ERROR:\s*\[youtube\]\s*.+?:\s*(.+?)(?:\n|$)/i);
           if (errorMatch) {
             errorMessage = errorMatch[1].trim();
           } else {
-            // Look for common error patterns
             const patterns = [
               /Sign in to confirm you['']re not a bot(.+?)(?:\n|$)/i,
               /Sign in to confirm your age(.+?)(?:\n|$)/i,
@@ -444,16 +440,15 @@ app.post("/extract", async (req: Request, res: Response) => {
           }
           
           lastError = new Error(errorMessage);
-          break; // Exit loop with this error
+          break;
         }
       }
       
-      // If we exhausted all clients and still have an error, throw it
+      // If all proxies failed, throw error
       if (lastError || (lastStderr && lastStdout)) {
         const fullOutput = lastStderr + "\n" + lastStdout;
         let errorMessage = "Unknown error";
         
-        // Parse error from last attempt
         const errorMatch = fullOutput.match(/ERROR:\s*\[youtube\]\s*.+?:\s*(.+?)(?:\n|$)/i);
         if (errorMatch) {
           errorMessage = errorMatch[1].trim();
