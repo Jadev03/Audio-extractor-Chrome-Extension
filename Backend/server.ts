@@ -292,8 +292,21 @@ app.post("/extract", async (req: Request, res: Response) => {
 
     // Use python -m yt_dlp if yt-dlp is not in PATH (preferred in Docker)
     if (usePythonModule) {
+      // Check for proxy configuration (from environment or .env)
+      const proxyUrl = process.env.YT_DLP_PROXY || process.env.PROXY_URL || null;
+      if (proxyUrl) {
+        logger.info("Proxy configured for yt-dlp", { requestId, proxy: proxyUrl.substring(0, 20) + "..." });
+      }
+      
+      // Check if cookies file exists
+      const cookiesPath = path.join(__dirname, "..", "cookies.txt");
+      const hasCookies = fs.existsSync(cookiesPath);
+      if (hasCookies) {
+        logger.info("Cookies file found, will use for authentication", { requestId, cookiesPath });
+      }
+      
       // Try multiple player clients to avoid bot detection
-      const playerClients = ["ios", "android", "web", "mweb"];
+      const playerClients = ["tv", "music", "ios", "android", "web", "mweb"];
       let lastError: Error | null = null;
       let lastStderr = "";
       let lastStdout = "";
@@ -321,6 +334,17 @@ app.post("/extract", async (req: Request, res: Response) => {
           "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", // Better user agent
           "--extractor-args", `youtube:player_client=${client}` // Try different player clients
         ];
+        
+        // Add proxy if configured
+        if (proxyUrl) {
+          args.push("--proxy", proxyUrl);
+          logger.info(`Using proxy for extraction`, { requestId, client, proxy: proxyUrl.substring(0, 30) + "..." });
+        }
+        
+        // Add cookies if available
+        if (hasCookies) {
+          args.push("--cookies", cookiesPath);
+        }
         
         // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
         if (ffmpegDir && ffmpegDir !== "") {
@@ -481,6 +505,13 @@ app.post("/extract", async (req: Request, res: Response) => {
       
       logger.info("yt-dlp execution completed successfully", { requestId });
     } else {
+      // Check for proxy configuration
+      const proxyUrl = process.env.YT_DLP_PROXY || process.env.PROXY_URL || null;
+      
+      // Check if cookies file exists
+      const cookiesPath = path.join(__dirname, "..", "cookies.txt");
+      const hasCookies = fs.existsSync(cookiesPath);
+      
       const ytDlpArgs = [
         cleanedUrl, // Use cleaned URL without playlist parameters
         "--no-playlist", // Only download single video, not entire playlist
@@ -492,6 +523,18 @@ app.post("/extract", async (req: Request, res: Response) => {
         "--output", outputPath,
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" // Better user agent
       ];
+      
+      // Add proxy if configured
+      if (proxyUrl) {
+        ytDlpArgs.push("--proxy", proxyUrl);
+        logger.info("Using proxy for yt-dlp-wrap", { requestId, proxy: proxyUrl.substring(0, 30) + "..." });
+      }
+      
+      // Add cookies if available
+      if (hasCookies) {
+        ytDlpArgs.push("--cookies", cookiesPath);
+        logger.info("Using cookies for yt-dlp-wrap", { requestId });
+      }
       
       // Only add ffmpeg-location if ffmpegDir is specified (not empty/system PATH)
       if (ffmpegDir && ffmpegDir !== "") {
