@@ -239,6 +239,44 @@ app.post("/extract", async (req: Request, res: Response) => {
       });
     }
 
+    // Apply noise reduction if enabled (using Python ML-based noisereduce)
+    const enableNoiseReduction = process.env.ENABLE_NOISE_REDUCTION !== "false";
+    if (enableNoiseReduction) {
+      const denoisedWavPath = wavOutputPath.replace(/\.wav$/, "-denoised.wav");
+      logger.info("Applying ML-based noise reduction", { requestId, input: wavOutputPath, output: denoisedWavPath });
+      
+      try {
+        await applyPythonNoiseReduction({
+          pythonBin: process.env.PYTHON_BIN || "python",
+          inputFile: wavOutputPath,
+          outputFile: denoisedWavPath,
+          method: process.env.NOISE_REDUCTION_METHOD || "spectral_gating",
+          stationary: process.env.NOISE_REDUCTION_STATIONARY === "true",
+          propDecrease: Number(process.env.NOISE_REDUCTION_PROP_DECREASE) || 0.8
+        });
+
+        // Replace original WAV with denoised version
+        if (fs.existsSync(denoisedWavPath)) {
+          fs.unlinkSync(wavOutputPath);
+          fs.renameSync(denoisedWavPath, wavOutputPath);
+          logger.info("Noise reduction completed", { requestId, file: wavOutputPath });
+        }
+      } catch (noiseReductionError) {
+        logger.warn("Noise reduction failed, continuing with original audio", {
+          requestId,
+          error: noiseReductionError instanceof Error ? noiseReductionError.message : String(noiseReductionError)
+        });
+        // Continue with original WAV if noise reduction fails
+        if (fs.existsSync(denoisedWavPath)) {
+          try {
+            fs.unlinkSync(denoisedWavPath);
+          } catch {
+            // Ignore cleanup errors
+          }
+        }
+      }
+    }
+
     logger.info("Running VAD segmentation", { requestId, wavOutputPath, vadOutputDir });
     const segmentPrefix = `audio-${timestamp}`;
     const vadResult = await runSileroVad({
@@ -459,6 +497,98 @@ const convertMp3ToWav = (options: ConvertParams) => {
         resolve();
       } else {
         reject(new Error(`FFmpeg exited with code ${code}`));
+      }
+    });
+  });
+};
+
+type PythonNoiseReductionParams = {
+  pythonBin: string;
+  inputFile: string;
+  outputFile: string;
+  method: string;
+  stationary: boolean;
+  propDecrease: number;
+};
+
+const applyPythonNoiseReduction = (params: PythonNoiseReductionParams): Promise<void> => {
+  const noiseReductionScriptPath = path.join(__dirname, "noise_reduction.py");
+
+  if (!fs.existsSync(noiseReductionScriptPath)) {
+    throw new Error(`Noise reduction script not found at ${noiseReductionScriptPath}`);
+  }
+
+  return new Promise((resolve, reject) => {
+    const args = [
+      noiseReductionScriptPath,
+      "--input",
+      params.inputFile,
+      "--output",
+      params.outputFile,
+      "--method",
+      params.method,
+      "--prop-decrease",
+      params.propDecrease.toString()
+    ];
+
+    if (params.stationary) {
+      args.push("--stationary");
+    }
+
+    logger.info("Running Python noise reduction", {
+      method: params.method,
+      stationary: params.stationary,
+      propDecrease: params.propDecrease
+    });
+
+    const pythonProcess = spawn(params.pythonBin, args, { shell: false });
+    let stdout = "";
+    let stderr = "";
+
+    pythonProcess.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    pythonProcess.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    pythonProcess.on("error", (error) => {
+      reject(new Error(`Failed to start noise reduction process: ${error.message}`));
+    });
+
+    pythonProcess.on("close", (code) => {
+      if (code !== 0) {
+        return reject(new Error(stderr || `Noise reduction script exited with code ${code}`));
+      }
+
+      try {
+        const result = JSON.parse(stdout);
+        if (result.success) {
+          logger.info("Noise reduction completed successfully", {
+            method: result.method,
+            duration: result.duration
+          });
+          resolve();
+        } else {
+          reject(new Error(result.error || "Noise reduction failed"));
+        }
+      } catch (err) {
+        // If output is not JSON, check if file was created
+        if (fs.existsSync(params.outputFile)) {
+          logger.info("Noise reduction completed (no JSON output)", {
+            outputFile: params.outputFile
+          });
+          resolve();
+        } else {
+          reject(
+            new Error(
+              `Failed to parse noise reduction output: ${
+                err instanceof Error ? err.message : String(err)
+              } | Raw output: ${stdout} | Errors: ${stderr}`
+            )
+          );
+        }
       }
     });
   });
