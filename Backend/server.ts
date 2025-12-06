@@ -148,30 +148,51 @@ if (!fs.existsSync(downloadsDir)) {
 }
 
 app.post("/extract", async (req: Request, res: Response) => {
-  const { youtubeUrl } = req.body;
+  const { youtubeUrl, facebookUrl, videoUrl } = req.body;
+  // Support both old format (youtubeUrl) and new format (videoUrl) for backward compatibility
+  const url = videoUrl || youtubeUrl || facebookUrl;
   const requestId = `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+  // Detect platform from URL
+  const isYouTube = url && (url.includes("youtube.com") || url.includes("youtu.be"));
+  const isFacebook = url && (url.includes("facebook.com") || url.includes("fb.com") || url.includes("fb.watch"));
+  const platform = isYouTube ? "YouTube" : isFacebook ? "Facebook" : "Unknown";
 
   logger.info("Audio extraction request received", {
     requestId,
-    youtubeUrl: youtubeUrl || "missing",
+    videoUrl: url || "missing",
+    platform,
     ip: req.ip || req.socket.remoteAddress
   });
 
-  if (!youtubeUrl) {
-    logger.warn("Audio extraction failed: Missing YouTube URL", {
+  if (!url) {
+    logger.warn("Audio extraction failed: Missing video URL", {
       requestId,
       ip: req.ip || req.socket.remoteAddress
     });
     
     auditLog("EXTRACTION_FAILED", {
       requestId,
-      reason: "Missing YouTube URL",
+      reason: "Missing video URL",
       ip: req.ip || req.socket.remoteAddress
     });
 
     return res.status(400).json({ 
       success: false, 
-      error: "YouTube URL is required" 
+      error: "Video URL is required (YouTube or Facebook)" 
+    });
+  }
+
+  if (!isYouTube && !isFacebook) {
+    logger.warn("Audio extraction failed: Unsupported platform", {
+      requestId,
+      url: url.substring(0, 50),
+      ip: req.ip || req.socket.remoteAddress
+    });
+    
+    return res.status(400).json({ 
+      success: false, 
+      error: "Unsupported platform. Only YouTube and Facebook URLs are supported." 
     });
   }
 
@@ -184,7 +205,8 @@ app.post("/extract", async (req: Request, res: Response) => {
   try {
     logger.info("Starting audio extraction", {
       requestId,
-      youtubeUrl,
+      videoUrl: url,
+      platform,
       outputPath: mp3OutputPath
     });
 
@@ -192,7 +214,7 @@ app.post("/extract", async (req: Request, res: Response) => {
     const buildBaseArgs = (includeCookies: boolean = false) => {
       const browserForCookies = process.env.YT_DLP_BROWSER || "chrome";
       const baseArgs = [
-        youtubeUrl,
+        url,
         "--no-playlist", // Only download single video, not entire playlist
         "--ffmpeg-location", ffmpegDir || (ffmpegPath !== "ffmpeg" ? path.dirname(ffmpegPath) : ""), // Set ffmpeg location
         "--extract-audio", // Extract audio only
@@ -516,7 +538,8 @@ app.post("/extract", async (req: Request, res: Response) => {
 
     logger.info("Audio extraction successful", {
       requestId,
-      youtubeUrl,
+      videoUrl: url,
+      platform,
       fileName,
       fileSize: `${(fileSize / 1024 / 1024).toFixed(2)} MB`,
       duration: `${duration}ms`,
@@ -525,7 +548,8 @@ app.post("/extract", async (req: Request, res: Response) => {
 
     auditLog("EXTRACTION_SUCCESS", {
       requestId,
-      youtubeUrl,
+      videoUrl: url,
+      platform,
       fileName,
       fileSize,
       duration,
@@ -559,7 +583,8 @@ app.post("/extract", async (req: Request, res: Response) => {
       errorMessage = "yt-dlp is not installed or not found in PATH. Please install yt-dlp: pip install yt-dlp";
       logger.error("yt-dlp not found - installation required", {
         requestId,
-        youtubeUrl,
+        videoUrl: url,
+        platform,
         error: errorMessage,
         hint: "Install yt-dlp using: pip install yt-dlp or download from https://github.com/yt-dlp/yt-dlp/releases"
       });
@@ -567,7 +592,8 @@ app.post("/extract", async (req: Request, res: Response) => {
 
     logger.error("Audio extraction failed", {
       requestId,
-      youtubeUrl,
+      videoUrl: url,
+      platform,
       error: errorMessage,
       stack: errorStack,
       duration: `${duration}ms`
@@ -575,7 +601,8 @@ app.post("/extract", async (req: Request, res: Response) => {
 
     auditLog("EXTRACTION_FAILED", {
       requestId,
-      youtubeUrl,
+      videoUrl: url,
+      platform,
       error: errorMessage,
       duration,
       ip: req.ip || req.socket.remoteAddress
