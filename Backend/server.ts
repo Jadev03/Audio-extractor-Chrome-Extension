@@ -288,8 +288,49 @@ app.post("/extract", async (req: Request, res: Response) => {
       });
     }
 
-    // Run VAD segmentation FIRST (before noise reduction)
-    // We'll apply noise reduction to each segment individually
+    // Apply noise reduction to the main WAV file FIRST
+    const enableNoiseReduction = process.env.ENABLE_NOISE_REDUCTION !== "false";
+    if (enableNoiseReduction) {
+      const denoisedWavPath = wavOutputPath.replace(/\.wav$/, "-denoised.wav");
+      logger.info("Applying ML-based noise reduction to main audio file", { 
+        requestId, 
+        input: wavOutputPath, 
+        output: denoisedWavPath 
+      });
+      
+      try {
+        await applyPythonNoiseReduction({
+          pythonBin: process.env.PYTHON_BIN || "python",
+          inputFile: wavOutputPath,
+          outputFile: denoisedWavPath,
+          method: process.env.NOISE_REDUCTION_METHOD || "spectral_gating",
+          stationary: process.env.NOISE_REDUCTION_STATIONARY === "true",
+          propDecrease: Number(process.env.NOISE_REDUCTION_PROP_DECREASE) || 0.8
+        });
+
+        // Replace original WAV with denoised version
+        if (fs.existsSync(denoisedWavPath)) {
+          fs.unlinkSync(wavOutputPath);
+          fs.renameSync(denoisedWavPath, wavOutputPath);
+          logger.info("Noise reduction completed on main audio file", { requestId, file: wavOutputPath });
+        }
+      } catch (noiseReductionError) {
+        logger.warn("Noise reduction failed, continuing with original audio", {
+          requestId,
+          error: noiseReductionError instanceof Error ? noiseReductionError.message : String(noiseReductionError)
+        });
+        // Continue with original WAV if noise reduction fails
+        if (fs.existsSync(denoisedWavPath)) {
+          try {
+            fs.unlinkSync(denoisedWavPath);
+          } catch {
+            // Ignore cleanup errors
+          }
+        }
+      }
+    }
+
+    // Run VAD segmentation on the noise-reduced audio file
     // VAD parameters - using defaults that match vad_split.py, .env values will override
     const vadMinSilenceMs = Number(process.env.VAD_MIN_SILENCE_MS) || 650;
     const vadMinSpeechMs = Number(process.env.VAD_MIN_SPEECH_MS) || 900;
@@ -328,25 +369,6 @@ app.post("/extract", async (req: Request, res: Response) => {
       hasSegments: vadResult.segments && vadResult.segments.length > 0
     });
 
-    // Delete the main unsegmented WAV file immediately after segmentation
-    // We only keep the segmented audio files
-    try {
-      if (fs.existsSync(wavOutputPath)) {
-        await new Promise(resolve => setTimeout(resolve, 500)); // Wait for file handles to release
-        fs.unlinkSync(wavOutputPath);
-        logger.info("Main unsegmented WAV file deleted after segmentation", {
-          requestId,
-          file: wavOutputPath
-        });
-      }
-    } catch (deleteErr) {
-      logger.warn("Failed to delete main WAV file after segmentation", {
-        requestId,
-        file: wavOutputPath,
-        error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr)
-      });
-    }
-
     const fileName = path.basename(wavOutputPath);
     // Note: wavOutputPath may not exist if already deleted, so get fileSize safely
     let fileSize = 0;
@@ -369,105 +391,17 @@ app.post("/extract", async (req: Request, res: Response) => {
           segmentsDir: vadResult.segmentsDir
         });
 
-        // Apply noise reduction to each segment, then prepare for upload
-        const enableNoiseReduction = process.env.ENABLE_NOISE_REDUCTION !== "false";
-        const processedSegments: Array<{ filePath: string; fileName: string; originalSeg: any }> = [];
-
-        logger.info("Processing segments with noise reduction", {
+        // Prepare segments for upload (noise reduction already applied to main file before segmentation)
+        logger.info("Preparing segments for upload", {
           requestId,
           segmentsCount: vadResult.segments.length,
-          enableNoiseReduction
+          note: "Segments are already noise-reduced (applied to main file before segmentation)"
         });
 
-        // Process each segment: apply noise reduction, then prepare for upload
-        for (let i = 0; i < vadResult.segments.length; i++) {
-          const seg = vadResult.segments[i] as any;
-          const originalSegmentPath = seg.file;
-          let finalSegmentPath = originalSegmentPath;
-
-          // Apply noise reduction to each segment
-          if (enableNoiseReduction && fs.existsSync(originalSegmentPath)) {
-            const denoisedSegmentPath = originalSegmentPath.replace(/\.wav$/, "-denoised.wav");
-            
-            try {
-              logger.info("Applying noise reduction to segment", {
-                requestId,
-                segmentIndex: i + 1,
-                totalSegments: vadResult.segments.length,
-                inputFile: path.basename(originalSegmentPath)
-              });
-
-              await applyPythonNoiseReduction({
-                pythonBin: process.env.PYTHON_BIN || "python",
-                inputFile: originalSegmentPath,
-                outputFile: denoisedSegmentPath,
-                method: process.env.NOISE_REDUCTION_METHOD || "spectral_gating",
-                stationary: process.env.NOISE_REDUCTION_STATIONARY === "true",
-                propDecrease: Number(process.env.NOISE_REDUCTION_PROP_DECREASE) || 0.8
-              });
-
-              // Use denoised version if it was created successfully
-              if (fs.existsSync(denoisedSegmentPath)) {
-                // Delete original segment and use denoised version
-                try {
-                  fs.unlinkSync(originalSegmentPath);
-                } catch (deleteErr) {
-                  logger.warn("Failed to delete original segment after noise reduction", {
-                    requestId,
-                    segmentIndex: i + 1,
-                    file: originalSegmentPath
-                  });
-                }
-                finalSegmentPath = denoisedSegmentPath;
-                logger.info("Noise reduction completed for segment", {
-                  requestId,
-                  segmentIndex: i + 1,
-                  file: path.basename(finalSegmentPath)
-                });
-              }
-            } catch (noiseReductionError) {
-              logger.warn("Noise reduction failed for segment, using original", {
-                requestId,
-                segmentIndex: i + 1,
-                error: noiseReductionError instanceof Error ? noiseReductionError.message : String(noiseReductionError)
-              });
-              // Continue with original segment if noise reduction fails
-              if (fs.existsSync(denoisedSegmentPath)) {
-                try {
-                  fs.unlinkSync(denoisedSegmentPath);
-                } catch {
-                  // Ignore cleanup errors
-                }
-              }
-            }
-          }
-
-          // Add processed segment to upload list
-          if (fs.existsSync(finalSegmentPath)) {
-            processedSegments.push({
-              filePath: finalSegmentPath,
-              fileName: path.basename(finalSegmentPath),
-              originalSeg: seg
-            });
-          } else {
-            logger.warn("Segment file not found, skipping", {
-              requestId,
-              segmentIndex: i + 1,
-              file: finalSegmentPath
-            });
-          }
-        }
-
-        logger.info("Uploading noise-reduced segments to Google Drive", {
-          requestId,
-          processedSegmentsCount: processedSegments.length,
-          totalSegments: vadResult.segments.length
-        });
-
-        // Prepare segment files for upload
-        const segmentFiles = processedSegments.map(seg => ({
-          filePath: seg.filePath,
-          fileName: seg.fileName
+        // Prepare segment files for upload (segments are already noise-reduced since main file was processed)
+        const segmentFiles = vadResult.segments.map((seg: any) => ({
+          filePath: seg.file,
+          fileName: path.basename(seg.file)
         }));
 
         // Upload all processed segments to Google Drive
@@ -475,10 +409,9 @@ app.post("/extract", async (req: Request, res: Response) => {
 
         segmentUploadInfo = {
           uploadedCount: uploadedSegments.length,
-          totalCount: processedSegments.length,
+          totalCount: vadResult.segments.length,
           segments: uploadedSegments.map((uploaded, idx) => {
-            const processedSeg = processedSegments[idx];
-            const originalSeg = processedSeg?.originalSeg || vadResult.segments[idx] as any;
+            const originalSeg = vadResult.segments[idx] as any;
             return {
               ...uploaded,
               originalIndex: idx + 1,
@@ -497,8 +430,7 @@ app.post("/extract", async (req: Request, res: Response) => {
         if (uploadedSegments.length > 0) {
           try {
             const sheetEntries = uploadedSegments.map((uploaded, idx) => {
-              const processedSeg = processedSegments[idx];
-              const originalSeg = processedSeg?.originalSeg || vadResult.segments[idx] as any;
+              const originalSeg = vadResult.segments[idx] as any;
               const durationMs = originalSeg?.durationMs || 
                 (originalSeg?.end && originalSeg?.start ? (originalSeg.end - originalSeg.start) * 1000 : 0);
               const time = durationMs > 0 ? `${(durationMs / 1000).toFixed(2)}s` : "";
@@ -524,11 +456,29 @@ app.post("/extract", async (req: Request, res: Response) => {
           }
         }
 
+        // Delete the main unsegmented WAV file after successful upload
+        // Keep only the segmented audio files locally
+        try {
+          if (fs.existsSync(wavOutputPath)) {
+            await new Promise(resolve => setTimeout(resolve, 500)); // Wait for file handles to release
+            fs.unlinkSync(wavOutputPath);
+            logger.info("Main unsegmented WAV file deleted after upload", {
+              requestId,
+              file: wavOutputPath
+            });
+          }
+        } catch (deleteErr) {
+          logger.warn("Failed to delete main WAV file after upload", {
+            requestId,
+            file: wavOutputPath,
+            error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr)
+          });
+        }
+
         // Keep segmented audio files locally in downloads folder
-        // Only the main unsegmented file is deleted (already done above)
         logger.info("Segmented audio files kept locally in downloads folder", {
           requestId,
-          segmentsCount: processedSegments.length,
+          segmentsCount: vadResult.segments.length,
           segmentsDir: vadResult.segmentsDir
         });
       } catch (segmentUploadError) {
