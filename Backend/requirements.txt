@@ -1,0 +1,15 @@
+# Audio processing libraries
+librosa>=0.10.0
+soundfile>=0.12.0
+numpy>=1.24.0
+
+# Noise reduction
+noisereduce>=3.0.0
+
+# Deep learning for VAD
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# YouTube downloader
+yt-dlp>=2023.12.0
+

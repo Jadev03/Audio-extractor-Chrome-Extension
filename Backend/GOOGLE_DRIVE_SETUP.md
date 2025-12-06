@@ -14,10 +14,10 @@ The system supports:
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Create a new project or select an existing one
-3. Enable the **Google Drive API**:
+3. Enable the required APIs:
    - Navigate to "APIs & Services" > "Library"
-   - Search for "Google Drive API"
-   - Click "Enable"
+   - Search for "Google Drive API" and click "Enable"
+   - Search for "Google Sheets API" and click "Enable"
 
 ## 🔐 Step 2: Create OAuth 2.0 Credentials
 
@@ -29,7 +29,9 @@ The system supports:
      - App name: "YouTube Audio Extractor"
      - User support email: Your email
      - Developer contact: Your email
-   - Add scopes: `https://www.googleapis.com/auth/drive.file`
+   - Add scopes: 
+     - `https://www.googleapis.com/auth/drive.file`
+     - `https://www.googleapis.com/auth/spreadsheets`
    - Add test users (your email) if in testing mode
    - Save and continue
 4. Create OAuth client ID:
@@ -68,6 +70,10 @@ GOOGLE_REDIRECT_URI=http://localhost:5000/oauth2callback
 
 # Google Drive Folder ID (Required - where files will be uploaded)
 GOOGLE_DRIVE_FOLDER_ID=your_folder_id_here
+
+# User Number (1, 2, or 3) - determines which sheet to write to
+# User 1 → Sheet1, User 2 → Sheet2, User 3 → Sheet3
+USER_NUMBER=1
 
 # Note: GOOGLE_REFRESH_TOKEN is NOT needed in .env
 # It will be generated automatically during first-time OAuth setup
@@ -142,6 +148,14 @@ Response:
    - Automatically uploaded to your Google Drive folder
    - File permissions set to "anyone can read" (optional)
    - Returns Google Drive link in API response
+   - **Google Sheets Integration:**
+     - Uploaded audio URLs are automatically written to Google Sheets
+     - Sheet selection based on `USER_NUMBER` environment variable:
+       - `USER_NUMBER=1` → writes to Sheet1
+       - `USER_NUMBER=2` → writes to Sheet2
+       - `USER_NUMBER=3` → writes to Sheet3
+     - Each row contains: [Audio Link, Time, Text (blank)]
+     - Spreadsheet ID: `1o4yv-ET0dGA7ZEFpVOnV2oxZHM4vuDFYyZ6Y-zNW0Cc`
 
 ## 📤 API Response Format
 
@@ -175,6 +189,11 @@ After extraction, the API returns:
 - Complete OAuth flow by visiting `/auth/google`
 - Check `token.json` file exists in `Backend/` directory
 
+### "Google Sheets write failed" or missing Sheets scope
+- If you already have a token but it doesn't include Sheets scope, re-authenticate:
+  - Delete `token.json` file (or revoke access in Google Account)
+  - Visit `/auth/google` again to get new token with Sheets scope
+
 ### "Failed to upload to Google Drive"
 - Check folder ID is correct
 - Verify folder exists and is accessible
@@ -189,6 +208,7 @@ After extraction, the API returns:
 
 - [ ] Google Cloud project created
 - [ ] Google Drive API enabled
+- [ ] Google Sheets API enabled
 - [ ] OAuth 2.0 credentials created
 - [ ] Redirect URI configured (local and/or production)
 - [ ] Folder ID obtained from Google Drive

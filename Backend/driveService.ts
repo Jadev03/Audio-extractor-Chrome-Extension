@@ -210,7 +210,8 @@ export function getAuthUrl(): string {
 
   const oauth2Client = getOAuth2Client();
   const scopes = [
-    "https://www.googleapis.com/auth/drive.file"
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets"
   ];
 
   return oauth2Client.generateAuthUrl({
