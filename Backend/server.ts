@@ -111,15 +111,32 @@ try {
   }
 }
 
-// FFmpeg path configuration
-const ffmpegDir = "C:\\Users\\THABENDRA\\Desktop\\ffmpeg-2025-06-02-git-688f3944ce-full_build\\ffmpeg-build\\bin";
-const ffmpegPath = path.join(ffmpegDir, "ffmpeg.exe");
+// FFmpeg path configuration from .env file
+// FFMPEG_DIR: Directory containing ffmpeg.exe (e.g., "C:\\ffmpeg\\bin")
+// FFMPEG_PATH: Full path to ffmpeg.exe (e.g., "C:\\ffmpeg\\bin\\ffmpeg.exe")
+// If FFMPEG_PATH is set, use it directly; otherwise, construct from FFMPEG_DIR
+const ffmpegDir = process.env.FFMPEG_DIR || "";
+const ffmpegPath = process.env.FFMPEG_PATH || (ffmpegDir ? path.join(ffmpegDir, "ffmpeg.exe") : "ffmpeg");
 
 // Verify ffmpeg exists
-if (fs.existsSync(ffmpegPath)) {
-  logger.info("FFmpeg found at configured path", { ffmpegPath });
+if (ffmpegPath && ffmpegPath !== "ffmpeg") {
+  if (fs.existsSync(ffmpegPath)) {
+    logger.info("FFmpeg found at configured path", { ffmpegPath, ffmpegDir: ffmpegDir || path.dirname(ffmpegPath) });
+  } else {
+    logger.warn("FFmpeg not found at configured path. Audio conversion may fail.", { 
+      ffmpegPath, 
+      ffmpegDir: ffmpegDir || path.dirname(ffmpegPath),
+      hint: "Please check FFMPEG_DIR or FFMPEG_PATH in .env file"
+    });
+  }
 } else {
-  logger.warn("FFmpeg not found at configured path. Audio conversion may fail.", { ffmpegPath });
+  // Try to find ffmpeg in PATH
+  try {
+    execSync("ffmpeg -version", { stdio: "ignore" });
+    logger.info("FFmpeg found in system PATH");
+  } catch {
+    logger.warn("FFmpeg not found. Please set FFMPEG_DIR or FFMPEG_PATH in .env file. Audio conversion may fail.");
+  }
 }
 
 const ytDlpWrap = new YTDlpWrap();
@@ -177,7 +194,7 @@ app.post("/extract", async (req: Request, res: Response) => {
       const baseArgs = [
         youtubeUrl,
         "--no-playlist", // Only download single video, not entire playlist
-        "--ffmpeg-location", ffmpegDir, // Set ffmpeg location
+        "--ffmpeg-location", ffmpegDir || (ffmpegPath !== "ffmpeg" ? path.dirname(ffmpegPath) : ""), // Set ffmpeg location
         "--extract-audio", // Extract audio only
         "--audio-format", "mp3", // Convert to MP3
         "--audio-quality", "0", // Best quality
