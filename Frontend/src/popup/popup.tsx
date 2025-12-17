@@ -52,8 +52,10 @@ function Popup() {
 
       const data = await res.json();
       
-      if (data.success && data.fileUrl) {
-        setDownloadUrl(data.fileUrl);
+      if (data.success && (data.driveWebViewLink || data.driveWebContentLink)) {
+        // Prefer webViewLink (opens in Drive UI), fallback to direct content link
+        const link = data.driveWebViewLink || data.driveWebContentLink;
+        setDownloadUrl(link);
         setError("");
         setSuccess(true);
         
@@ -130,9 +132,9 @@ function Popup() {
       {downloadUrl && !loading && (
         <div className="download-section">
           <a href={downloadUrl} target="_blank" download>
-            <button className="download-button">📥 Download Audio</button>
+            <button className="download-button">📂 Open in Google Drive</button>
           </a>
-          <p className="download-hint">Click to download the MP3 file</p>
+          <p className="download-hint">This opens your uploaded WebM audio file in Google Drive</p>
         </div>
       )}
     </div>

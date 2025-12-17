@@ -56,7 +56,6 @@ import { createRequire } from "module";
 import { execSync, spawnSync, spawn } from "child_process";
 import logger, { auditLog } from "./logger.js";
 import { uploadMultipleToDrive, uploadToDrive, getAuthUrl, getTokenFromCode, isDriveConfigured } from "./driveService.js";
-import { writeMultipleToSheet, writeToSheet } from "./sheetsService.js";
 
 // Import yt-dlp-wrap as CommonJS module using createRequire
 const require = createRequire(import.meta.url);
@@ -197,9 +196,7 @@ app.post("/extract", async (req: Request, res: Response) => {
   }
 
   const timestamp = Date.now();
-  const mp3OutputPath = path.join(downloadsDir, `audio-${timestamp}.mp3`);
-  const wavOutputPath = path.join(downloadsDir, `audio-${timestamp}.wav`);
-  const vadOutputDir = path.join(downloadsDir, `audio-${timestamp}-segments`);
+  const webmOutputPath = path.join(downloadsDir, `audio-${timestamp}.webm`);
   const startTime = Date.now();
 
   try {
@@ -207,22 +204,20 @@ app.post("/extract", async (req: Request, res: Response) => {
       requestId,
       videoUrl: url,
       platform,
-      outputPath: mp3OutputPath
+      outputPath: webmOutputPath
     });
 
-    // Helper function to build base yt-dlp arguments
+    // Helper function to build base yt-dlp arguments for downloading original WebM audio
     const buildBaseArgs = (includeCookies: boolean = false) => {
       const browserForCookies = process.env.YT_DLP_BROWSER || "chrome";
       const baseArgs = [
         url,
         "--no-playlist", // Only download single video, not entire playlist
-        "--ffmpeg-location", ffmpegDir || (ffmpegPath !== "ffmpeg" ? path.dirname(ffmpegPath) : ""), // Set ffmpeg location
-        "--extract-audio", // Extract audio only
-        "--audio-format", "mp3", // Convert to MP3
-        "--audio-quality", "0", // Best quality
-        "--format", "bestaudio/best", // Prefer best audio format
-        "--postprocessor-args", "ffmpeg:-ac 2 -ar 44100", // Ensure stereo 44.1kHz
-        "--output", mp3OutputPath
+        // Download best available audio in WebM container without re-encoding
+        "--format",
+        "bestaudio[ext=webm]/bestaudio",
+        "--output",
+        webmOutputPath
       ];
       
       if (includeCookies) {
@@ -297,243 +292,74 @@ app.post("/extract", async (req: Request, res: Response) => {
     }
     
     // If still failed, throw the error
-    if (!result.success) {
-      throw new Error(result.error || "Audio extraction failed");
-    }
+      if (!result.success) {
+        throw new Error(result.error || "Audio extraction failed");
+      }
 
     // Check if file was created
-    if (!fs.existsSync(mp3OutputPath)) {
+    if (!fs.existsSync(webmOutputPath)) {
       throw new Error("Audio file was not created");
     }
 
-    logger.info("Converting MP3 to WAV", { requestId, source: mp3OutputPath, target: wavOutputPath });
-    await convertMp3ToWav({
-      ffmpegPath,
-      inputFile: mp3OutputPath,
-      outputFile: wavOutputPath,
-      sampleRate: 16000,
-      channels: 1
-    });
-
-    // Delete MP3 after successful conversion to save space
-    try {
-      fs.unlinkSync(mp3OutputPath);
-      logger.info("Source MP3 deleted after WAV conversion", { requestId, file: mp3OutputPath });
-    } catch (deleteErr) {
-      logger.warn("Failed to delete MP3 after WAV conversion", {
-        requestId,
-        file: mp3OutputPath,
-        error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr)
-      });
-    }
-
-    // Apply noise reduction to the main WAV file FIRST
-    const enableNoiseReduction = process.env.ENABLE_NOISE_REDUCTION !== "false";
-    if (enableNoiseReduction) {
-      const denoisedWavPath = wavOutputPath.replace(/\.wav$/, "-denoised.wav");
-      logger.info("Applying ML-based noise reduction to main audio file", { 
-        requestId, 
-        input: wavOutputPath, 
-        output: denoisedWavPath 
-      });
-      
-      try {
-        await applyPythonNoiseReduction({
-          pythonBin: process.env.PYTHON_BIN || "python",
-          inputFile: wavOutputPath,
-          outputFile: denoisedWavPath,
-          method: process.env.NOISE_REDUCTION_METHOD || "spectral_gating",
-          stationary: process.env.NOISE_REDUCTION_STATIONARY === "true",
-          propDecrease: Number(process.env.NOISE_REDUCTION_PROP_DECREASE) || 0.8
-        });
-
-        // Replace original WAV with denoised version
-        if (fs.existsSync(denoisedWavPath)) {
-          fs.unlinkSync(wavOutputPath);
-          fs.renameSync(denoisedWavPath, wavOutputPath);
-          logger.info("Noise reduction completed on main audio file", { requestId, file: wavOutputPath });
-        }
-      } catch (noiseReductionError) {
-        logger.warn("Noise reduction failed, continuing with original audio", {
-          requestId,
-          error: noiseReductionError instanceof Error ? noiseReductionError.message : String(noiseReductionError)
-        });
-        // Continue with original WAV if noise reduction fails
-        if (fs.existsSync(denoisedWavPath)) {
-          try {
-            fs.unlinkSync(denoisedWavPath);
-          } catch {
-            // Ignore cleanup errors
-          }
-        }
-      }
-    }
-
-    // Run VAD segmentation on the noise-reduced audio file
-    // VAD parameters - using defaults that match vad_split.py, .env values will override
-    const vadMinSilenceMs = Number(process.env.VAD_MIN_SILENCE_MS) || 650;
-    const vadMinSpeechMs = Number(process.env.VAD_MIN_SPEECH_MS) || 900;
-    const vadSentencePauseMs = Number(process.env.VAD_SENTENCE_PAUSE_MS) || 1100;
-    const vadMaxSegmentSeconds = Number(process.env.VAD_MAX_SEGMENT_SECONDS) || 28;
-    const vadSilenceThreshold = Number(process.env.VAD_SILENCE_THRESHOLD) || 0.004;
-
-    logger.info("Running VAD segmentation", { 
-      requestId, 
-      wavOutputPath, 
-      vadOutputDir,
-      minSilenceMs: vadMinSilenceMs,
-      minSpeechMs: vadMinSpeechMs,
-      sentencePauseMs: vadSentencePauseMs,
-      maxSegmentSeconds: vadMaxSegmentSeconds,
-      silenceThreshold: vadSilenceThreshold
-    });
-    const segmentPrefix = `audio-${timestamp}`;
-    const vadResult = await runSileroVad({
-      pythonBin: process.env.PYTHON_BIN || "python",
-      inputWav: wavOutputPath,
-      outputDir: vadOutputDir,
-      prefix: segmentPrefix,
-      minSilenceMs: vadMinSilenceMs,
-      minSpeechMs: vadMinSpeechMs,
-      sentencePauseMs: vadSentencePauseMs,
-      maxSegmentSeconds: vadMaxSegmentSeconds,
-      silenceThreshold: vadSilenceThreshold
-    });
-    
-    logger.info("VAD segmentation result", {
-      requestId,
-      segmentsCount: vadResult.segmentsCount,
-      totalSpeechMs: vadResult.totalSpeechMs,
-      segmentsDir: vadResult.segmentsDir,
-      hasSegments: vadResult.segments && vadResult.segments.length > 0
-    });
-
-    const fileName = path.basename(wavOutputPath);
-    // Note: wavOutputPath may not exist if already deleted, so get fileSize safely
+    const fileName = path.basename(webmOutputPath);
+    // Get file size safely
     let fileSize = 0;
     try {
-      if (fs.existsSync(wavOutputPath)) {
-        fileSize = fs.statSync(wavOutputPath).size;
+      if (fs.existsSync(webmOutputPath)) {
+        fileSize = fs.statSync(webmOutputPath).size;
       }
     } catch {
-      // File already deleted, that's fine
+      // File may have been deleted later; ignore
     }
     const duration = Date.now() - startTime;
 
-    // Upload only segmented audios to Google Drive and Google Sheets
-    let segmentUploadInfo = null;
-    if (isDriveConfigured() && vadResult.segments && vadResult.segments.length > 0) {
+    // Upload single WebM audio file directly to Google Drive
+    let driveUploadInfo: {
+      fileId: string;
+      webViewLink: string;
+      webContentLink: string;
+    } | null = null;
+
+    if (isDriveConfigured()) {
       try {
-        logger.info("Uploading segments to Google Drive", {
+        logger.info("Uploading WebM audio to Google Drive", {
           requestId,
-          segmentsCount: vadResult.segments.length,
-          segmentsDir: vadResult.segmentsDir
+          fileName,
+          filePath: webmOutputPath
         });
 
-        // Prepare segments for upload (noise reduction already applied to main file before segmentation)
-        logger.info("Preparing segments for upload", {
+        const uploaded = await uploadToDrive(webmOutputPath, fileName);
+        driveUploadInfo = uploaded;
+
+        logger.info("WebM audio uploaded to Google Drive successfully", {
           requestId,
-          segmentsCount: vadResult.segments.length,
-          note: "Segments are already noise-reduced (applied to main file before segmentation)"
+          fileId: uploaded.fileId,
+          webViewLink: uploaded.webViewLink
         });
 
-        // Prepare segment files for upload (segments are already noise-reduced since main file was processed)
-        const segmentFiles = vadResult.segments.map((seg: any) => ({
-          filePath: seg.file,
-          fileName: path.basename(seg.file)
-        }));
-
-        // Upload all processed segments to Google Drive
-        const uploadedSegments = await uploadMultipleToDrive(segmentFiles);
-
-        segmentUploadInfo = {
-          uploadedCount: uploadedSegments.length,
-          totalCount: vadResult.segments.length,
-          segments: uploadedSegments.map((uploaded, idx) => {
-            const originalSeg = vadResult.segments[idx] as any;
-            return {
-              ...uploaded,
-              originalIndex: idx + 1,
-              durationMs: originalSeg?.durationMs || (originalSeg?.end && originalSeg?.start ? (originalSeg.end - originalSeg.start) * 1000 : 0)
-            };
-          })
-        };
-
-        logger.info("Segments uploaded to Google Drive successfully", {
-          requestId,
-          uploadedCount: uploadedSegments.length,
-          totalCount: vadResult.segments.length
-        });
-
-        // Write uploaded segment URLs to Google Sheet
-        if (uploadedSegments.length > 0) {
-          try {
-            const sheetEntries = uploadedSegments.map((uploaded, idx) => {
-              const originalSeg = vadResult.segments[idx] as any;
-              const durationMs = originalSeg?.durationMs || 
-                (originalSeg?.end && originalSeg?.start ? (originalSeg.end - originalSeg.start) * 1000 : 0);
-              const time = durationMs > 0 ? `${(durationMs / 1000).toFixed(2)}s` : "";
-              
-              return {
-                audioUrl: uploaded.webViewLink || "",
-                time: time,
-                text: "" // Always blank as per requirements
-              };
-            });
-
-            await writeMultipleToSheet(sheetEntries);
-            logger.info("Segment URLs written to Google Sheet", {
-              requestId,
-              count: sheetEntries.length
-            });
-          } catch (sheetError) {
-            logger.error("Failed to write to Google Sheet", {
-              requestId,
-              error: sheetError instanceof Error ? sheetError.message : String(sheetError)
-            });
-            // Don't fail the entire request if sheet write fails
-          }
-        }
-
-        // Delete the main unsegmented WAV file after successful upload
-        // Keep only the segmented audio files locally
+        // Optionally delete local file after successful upload
         try {
-          if (fs.existsSync(wavOutputPath)) {
-            await new Promise(resolve => setTimeout(resolve, 500)); // Wait for file handles to release
-            fs.unlinkSync(wavOutputPath);
-            logger.info("Main unsegmented WAV file deleted after upload", {
+          if (fs.existsSync(webmOutputPath)) {
+            fs.unlinkSync(webmOutputPath);
+            logger.info("Local WebM file deleted after upload", {
               requestId,
-              file: wavOutputPath
+              file: webmOutputPath
             });
           }
         } catch (deleteErr) {
-          logger.warn("Failed to delete main WAV file after upload", {
+          logger.warn("Failed to delete local WebM file after upload", {
             requestId,
-            file: wavOutputPath,
+            file: webmOutputPath,
             error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr)
           });
         }
-
-        // Keep segmented audio files locally in downloads folder
-        logger.info("Segmented audio files kept locally in downloads folder", {
+      } catch (uploadError) {
+        logger.error("Failed to upload WebM audio to Google Drive", {
           requestId,
-          segmentsCount: vadResult.segments.length,
-          segmentsDir: vadResult.segmentsDir
+          error: uploadError instanceof Error ? uploadError.message : String(uploadError)
         });
-      } catch (segmentUploadError) {
-        logger.error("Failed to upload segments to Google Drive", {
-          requestId,
-          error: segmentUploadError instanceof Error ? segmentUploadError.message : String(segmentUploadError)
-        });
-        // Don't fail the entire request if segment upload fails
+        // Don't fail the entire request if upload fails; user still has local file (if not deleted)
       }
-    } else if (vadResult.segments && vadResult.segments.length === 0) {
-      // No segments detected - log warning but don't upload anything
-      logger.warn("No segments detected by VAD, nothing to upload", {
-        requestId,
-        segmentsCount: vadResult.segmentsCount,
-        note: "Main WAV file already deleted, only segmented audios are uploaded"
-      });
     }
 
     logger.info("Audio extraction successful", {
@@ -542,8 +368,7 @@ app.post("/extract", async (req: Request, res: Response) => {
       platform,
       fileName,
       fileSize: `${(fileSize / 1024 / 1024).toFixed(2)} MB`,
-      duration: `${duration}ms`,
-      segmentsCount: vadResult?.segmentsCount || 0
+      duration: `${duration}ms`
     });
 
     auditLog("EXTRACTION_SUCCESS", {
@@ -553,24 +378,20 @@ app.post("/extract", async (req: Request, res: Response) => {
       fileName,
       fileSize,
       duration,
-      segmentsCount: vadResult?.segmentsCount || 0,
-      segmentsUploaded: segmentUploadInfo?.uploadedCount || 0,
       ip: req.ip || req.socket.remoteAddress
     });
 
-    // Return response with segment information
+    // Return response with Google Drive information
     res.json({
       success: true,
-      segmentsCount: vadResult?.segmentsCount || 0,
-      vadSegments: vadResult?.segments || [],
-      segmentsUploaded: segmentUploadInfo ? {
-        uploadedCount: segmentUploadInfo.uploadedCount,
-        totalCount: segmentUploadInfo.totalCount,
-        segments: segmentUploadInfo.segments
-      } : null,
-      message: segmentUploadInfo 
-        ? `${segmentUploadInfo.uploadedCount} segments uploaded to Google Drive`
-        : "Segments created locally (Google Drive not configured)"
+      fileName,
+      fileSize,
+      driveFileId: driveUploadInfo?.fileId || null,
+      driveWebViewLink: driveUploadInfo?.webViewLink || null,
+      driveWebContentLink: driveUploadInfo?.webContentLink || null,
+      message: driveUploadInfo
+        ? "WebM audio uploaded to Google Drive"
+        : "WebM audio downloaded locally (Google Drive not configured)"
     });
 
   } catch (err) {
