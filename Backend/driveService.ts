@@ -280,8 +280,19 @@ export async function uploadToDrive(
       fileMetadata.parents = [DRIVE_FOLDER_ID];
     }
 
+    // Infer MIME type from file extension, default to generic binary if unknown
+    const ext = path.extname(fileName).toLowerCase();
+    let mimeType = "application/octet-stream";
+    if (ext === ".webm") {
+      mimeType = "audio/webm";
+    } else if (ext === ".mp3") {
+      mimeType = "audio/mpeg";
+    } else if (ext === ".wav") {
+      mimeType = "audio/wav";
+    }
+
     const media = {
-      mimeType: "audio/mpeg",
+      mimeType,
       body: fs.createReadStream(filePath),
     };
 
