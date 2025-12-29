@@ -436,6 +436,400 @@ app.post("/extract", async (req: Request, res: Response) => {
   }
 });
 
+// Helper function to extract audio from a single video URL
+async function extractSingleVideo(
+  videoUrl: string,
+  requestId: string
+): Promise<{ success: boolean; fileName?: string; driveFileId?: string; driveWebViewLink?: string; error?: string }> {
+  const timestamp = Date.now();
+  const webmOutputPath = path.join(downloadsDir, `audio-${timestamp}-${Math.random().toString(36).substr(2, 9)}.webm`);
+
+  try {
+    // Helper function to build base yt-dlp arguments
+    const buildBaseArgs = (includeCookies: boolean = false) => {
+      const browserForCookies = process.env.YT_DLP_BROWSER || "chrome";
+      const baseArgs = [
+        videoUrl,
+        "--no-playlist",
+        "--format",
+        "bestaudio[ext=webm]/bestaudio",
+        "--output",
+        webmOutputPath
+      ];
+      
+      if (includeCookies) {
+        baseArgs.splice(2, 0, "--cookies-from-browser", browserForCookies);
+      }
+      
+      return baseArgs;
+    };
+
+    // Try extraction with cookies first, fallback to without cookies if it fails
+    const tryExtraction = async (withCookies: boolean): Promise<{ success: boolean; error?: string }> => {
+      try {
+        if (usePythonModule) {
+          const args = ["-m", "yt_dlp", ...buildBaseArgs(withCookies)];
+          const result = spawnSync("python", args, {
+            stdio: "pipe",
+            shell: false
+          });
+          
+          if (result.error) {
+            throw result.error;
+          }
+          
+          if (result.status === 0) {
+            return { success: true };
+          } else {
+            const errorOutput = (result.stderr?.toString() || result.stdout?.toString() || "").toLowerCase();
+            if (withCookies && (errorOutput.includes("cookie") || errorOutput.includes("could not copy"))) {
+              return { success: false, error: "COOKIE_EXTRACTION_FAILED" };
+            } else {
+              throw new Error(`yt-dlp process exited with code ${result.status}`);
+            }
+          }
+        } else {
+          try {
+            await ytDlpWrap.exec(buildBaseArgs(withCookies));
+            return { success: true };
+          } catch (wrapError: any) {
+            const errorMsg = (wrapError?.message || String(wrapError) || "").toLowerCase();
+            if (withCookies && (errorMsg.includes("cookie") || errorMsg.includes("could not copy"))) {
+              return { success: false, error: "COOKIE_EXTRACTION_FAILED" };
+            }
+            throw wrapError;
+          }
+        }
+      } catch (err: any) {
+        const errorMsg = err?.message || String(err) || "";
+        if (withCookies && (errorMsg.toLowerCase().includes("cookie") || errorMsg.toLowerCase().includes("could not copy"))) {
+          return { success: false, error: "COOKIE_EXTRACTION_FAILED" };
+        }
+        throw err;
+      }
+    };
+
+    // First attempt: with cookies
+    let result = await tryExtraction(true);
+    
+    // If cookie extraction failed, retry without cookies
+    if (!result.success && result.error === "COOKIE_EXTRACTION_FAILED") {
+      logger.info("Retrying extraction without cookies", { requestId, videoUrl });
+      result = await tryExtraction(false);
+    }
+    
+    if (!result.success) {
+      throw new Error(result.error || "Audio extraction failed");
+    }
+
+    // Check if file was created
+    if (!fs.existsSync(webmOutputPath)) {
+      throw new Error("Audio file was not created");
+    }
+
+    const fileName = path.basename(webmOutputPath);
+
+    // Upload to Google Drive if configured
+    let driveUploadInfo: {
+      fileId: string;
+      webViewLink: string;
+      webContentLink: string;
+    } | null = null;
+
+    if (isDriveConfigured()) {
+      try {
+        logger.info("Uploading WebM audio to Google Drive", {
+          requestId,
+          fileName,
+          filePath: webmOutputPath,
+          videoUrl
+        });
+
+        const uploaded = await uploadToDrive(webmOutputPath, fileName);
+        driveUploadInfo = uploaded;
+
+        logger.info("WebM audio uploaded to Google Drive successfully", {
+          requestId,
+          fileId: uploaded.fileId,
+          webViewLink: uploaded.webViewLink,
+          videoUrl
+        });
+
+        // Delete local file after successful upload
+        try {
+          if (fs.existsSync(webmOutputPath)) {
+            fs.unlinkSync(webmOutputPath);
+            logger.info("Local WebM file deleted after upload", {
+              requestId,
+              file: webmOutputPath
+            });
+          }
+        } catch (deleteErr) {
+          logger.warn("Failed to delete local WebM file after upload", {
+            requestId,
+            file: webmOutputPath,
+            error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr)
+          });
+        }
+      } catch (uploadError) {
+        logger.error("Failed to upload WebM audio to Google Drive", {
+          requestId,
+          error: uploadError instanceof Error ? uploadError.message : String(uploadError),
+          videoUrl
+        });
+        // Continue even if upload fails
+      }
+    }
+
+    return {
+      success: true,
+      fileName,
+      driveFileId: driveUploadInfo?.fileId,
+      driveWebViewLink: driveUploadInfo?.webViewLink
+    };
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : "Unknown error occurred";
+    logger.error("Single video extraction failed", {
+      requestId,
+      videoUrl,
+      error: errorMessage
+    });
+    return {
+      success: false,
+      error: errorMessage
+    };
+  }
+}
+
+// Endpoint to extract audio from all videos in a YouTube playlist
+app.post("/extract-playlist", async (req: Request, res: Response) => {
+  const { playlistUrl } = req.body;
+  const requestId = `playlist-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+  // Check if it's a YouTube playlist URL
+  const isYouTubePlaylist = playlistUrl && (
+    playlistUrl.includes("youtube.com/playlist") || 
+    playlistUrl.includes("youtube.com/watch") && playlistUrl.includes("list=")
+  );
+
+  logger.info("Playlist extraction request received", {
+    requestId,
+    playlistUrl: playlistUrl || "missing",
+    ip: req.ip || req.socket.remoteAddress
+  });
+
+  if (!playlistUrl) {
+    logger.warn("Playlist extraction failed: Missing playlist URL", {
+      requestId,
+      ip: req.ip || req.socket.remoteAddress
+    });
+    
+    return res.status(400).json({ 
+      success: false, 
+      error: "Playlist URL is required" 
+    });
+  }
+
+  if (!isYouTubePlaylist) {
+    logger.warn("Playlist extraction failed: Not a YouTube playlist URL", {
+      requestId,
+      url: playlistUrl.substring(0, 50),
+      ip: req.ip || req.socket.remoteAddress
+    });
+    
+    return res.status(400).json({ 
+      success: false, 
+      error: "Only YouTube playlist URLs are supported" 
+    });
+  }
+
+  try {
+    logger.info("Starting playlist extraction", {
+      requestId,
+      playlistUrl
+    });
+
+    // Get all video URLs from the playlist using yt-dlp
+    const getPlaylistUrls = async (): Promise<string[]> => {
+      const browserForCookies = process.env.YT_DLP_BROWSER || "chrome";
+      const args = [
+        playlistUrl,
+        "--flat-playlist",
+        "--print", "%(url)s",
+        "--no-warnings"
+      ];
+
+      // Try with cookies first
+      let result: { success: boolean; urls: string[]; error?: string } = { success: false, urls: [] };
+      
+      try {
+        if (usePythonModule) {
+          const cookieArgs = ["-m", "yt_dlp", "--cookies-from-browser", browserForCookies, ...args];
+          const procResult = spawnSync("python", cookieArgs, {
+            stdio: "pipe",
+            shell: false,
+            encoding: "utf-8"
+          });
+          
+          if (procResult.status === 0 && procResult.stdout) {
+            const urls = procResult.stdout.trim().split("\n").filter(url => url.trim().length > 0);
+            if (urls.length > 0) {
+              return urls;
+            }
+          }
+        } else {
+          // For yt-dlp binary, use spawnSync
+          try {
+            const cookieArgs = ["--cookies-from-browser", browserForCookies, ...args];
+            const procResult = spawnSync("yt-dlp", cookieArgs, {
+              stdio: "pipe",
+              shell: false,
+              encoding: "utf-8"
+            });
+            
+            if (procResult.status === 0 && procResult.stdout) {
+              const urls = procResult.stdout.trim().split("\n").filter(url => url.trim().length > 0);
+              if (urls.length > 0) {
+                return urls;
+              }
+            }
+          } catch (e) {
+            // Fall through to try without cookies
+          }
+        }
+      } catch (cookieError) {
+        logger.warn("Failed to get playlist URLs with cookies, trying without", {
+          requestId,
+          error: cookieError instanceof Error ? cookieError.message : String(cookieError)
+        });
+      }
+
+      // Try without cookies
+      try {
+        if (usePythonModule) {
+          const noCookieArgs = ["-m", "yt_dlp", ...args];
+          const procResult = spawnSync("python", noCookieArgs, {
+            stdio: "pipe",
+            shell: false,
+            encoding: "utf-8"
+          });
+          
+          if (procResult.status === 0 && procResult.stdout) {
+            const urls = procResult.stdout.trim().split("\n").filter(url => url.trim().length > 0);
+            return urls;
+          } else {
+            throw new Error(`yt-dlp exited with code ${procResult.status}`);
+          }
+        } else {
+          const procResult = spawnSync("yt-dlp", args, {
+            stdio: "pipe",
+            shell: false,
+            encoding: "utf-8"
+          });
+          
+          if (procResult.status === 0 && procResult.stdout) {
+            const urls = procResult.stdout.trim().split("\n").filter(url => url.trim().length > 0);
+            return urls;
+          } else {
+            const errorOutput = procResult.stderr?.toString() || procResult.stdout?.toString() || "";
+            throw new Error(`yt-dlp exited with code ${procResult.status}: ${errorOutput.substring(0, 200)}`);
+          }
+        }
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to get playlist URLs: ${errorMsg}`);
+      }
+    };
+
+    const videoUrls = await getPlaylistUrls();
+    
+    if (videoUrls.length === 0) {
+      throw new Error("No videos found in playlist");
+    }
+
+    logger.info("Found videos in playlist", {
+      requestId,
+      videoCount: videoUrls.length
+    });
+
+    // Process each video one by one
+    const results: Array<{
+      videoUrl: string;
+      success: boolean;
+      fileName?: string;
+      driveFileId?: string;
+      driveWebViewLink?: string;
+      error?: string;
+    }> = [];
+
+    for (let i = 0; i < videoUrls.length; i++) {
+      const videoUrl = videoUrls[i];
+      logger.info("Processing video from playlist", {
+        requestId,
+        videoIndex: i + 1,
+        totalVideos: videoUrls.length,
+        videoUrl
+      });
+
+      const result = await extractSingleVideo(videoUrl, `${requestId}-video-${i + 1}`);
+      results.push({
+        videoUrl,
+        ...result
+      });
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const failureCount = results.filter(r => !r.success).length;
+
+    logger.info("Playlist extraction completed", {
+      requestId,
+      totalVideos: videoUrls.length,
+      successCount,
+      failureCount
+    });
+
+    auditLog("PLAYLIST_EXTRACTION_COMPLETED", {
+      requestId,
+      playlistUrl,
+      totalVideos: videoUrls.length,
+      successCount,
+      failureCount,
+      ip: req.ip || req.socket.remoteAddress
+    });
+
+    res.json({
+      success: true,
+      totalVideos: videoUrls.length,
+      successCount,
+      failureCount,
+      results
+    });
+
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : "Unknown error occurred";
+    const errorStack = err instanceof Error ? err.stack : undefined;
+
+    logger.error("Playlist extraction failed", {
+      requestId,
+      playlistUrl,
+      error: errorMessage,
+      stack: errorStack
+    });
+
+    auditLog("PLAYLIST_EXTRACTION_FAILED", {
+      requestId,
+      playlistUrl,
+      error: errorMessage,
+      ip: req.ip || req.socket.remoteAddress
+    });
+
+    res.status(500).json({ 
+      success: false, 
+      error: errorMessage 
+    });
+  }
+});
+
 type ConvertParams = {
   ffmpegPath: string;
   inputFile: string;
